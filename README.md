@@ -1,23 +1,24 @@
 <h1 align="center">vecmemori</h1>
 <p align="center">
-  <em>Hybrid memory engine for AI agents — SQLite + FTS5 + HRR algebra + neural embeddings</em>
+  <em>Local, private fact memory for AI agents — SQLite + FTS5 + neural embeddings</em>
   <br>
-  <em>AIエージェントのためのハイブリッド記憶エンジン</em>
+  <em>AIエージェントのためのローカル記憶エンジン</em>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
   <a href="#installation">Installation</a> •
+  <a href="#features">Features</a> •
   <a href="#usage">Usage</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#model-swap">Model Swap</a>
+  <a href="#model-swap">Model Swap</a> •
+  <a href="#configuration">Configuration</a>
   <br>
   <a href="#日本語">日本語</a>
 </p>
 
 ---
 
-**vecmemori** is a local, private, persistent fact memory for AI agents. It stores short facts (preferences, decisions, project details) in SQLite and retrieves them using a **4-strategy hybrid search** — combining full-text search, token overlap, symbolic vector algebra, and optional neural embeddings.
+**vecmemori** is a local, private, persistent fact memory for AI agents. It stores short facts (preferences, decisions, project details) in SQLite and retrieves them using a **dual-strategy hybrid search** — combining full-text search (FTS5) with neural embedding similarity.
 
 Unlike cloud-based memory services, vecmemori runs entirely on your machine. No data ever leaves your device (unless you choose to use a remote embedding model).
 
@@ -38,37 +39,40 @@ for r in results:
     print(f"[{r['trust_score']:.2f}] {r['content']}")
 ```
 
-## Features
-
-- **4-strategy hybrid search** — FTS5 + Jaccard + HRR + neural embeddings (weighted: 0.30 / 0.10 / 0.20 / 0.40)
-- **🇯🇵 Japanese FTS5** — fugashi (MeCab) tokenizer for Japanese full-text search (install with `vecmemori[ja]`)
-- **Entity resolution** — auto-extracts entities from fact content
-- **Trust scoring** — asymmetric feedback (helpful: +0.05, unhelpful: -0.10)
-- **Algebraic retrieval** — probe, reason, related, contradict
-- **Temporal decay** — optionally decay older facts
-- **Graceful degradation** — works with numpy only; embeddings and tokenizer optional
-- **Configurable embeddings** — swap any SentenceTransformer model
-
 ## Installation
 
 ```bash
-pip install vecmemori               # core (numpy only)
-pip install vecmemori[embed]        # with neural embeddings
-pip install vecmemori[ja]           # with Japanese FTS5 (fugashi + unidic-lite)
-pip install vecmemori[all]          # everything
-pip install vecmemori[hermes]       # with Hermes Agent plugin (includes embed)
+pip install vecmemori                        # core (numpy only)
+pip install vecmemori[embed]                 # with neural embeddings
+pip install vecmemori[ja]                    # with Japanese FTS5 (fugashi + unidic-lite)
+pip install vecmemori[all]                   # everything
+pip install vecmemori[hermes]                # with Hermes Agent plugin (includes embed)
 ```
 
 ### Japanese FTS5 support
 
 vecmemori uses [fugashi](https://github.com/polm/fugashi) (MeCab) to tokenize Japanese text before indexing it in FTS5. This enables proper keyword search for Japanese queries — searching `"ダークモード"` finds facts containing `"ダーク"` or `"モード"` individually.
 
-Without `[ja]`, FTS5 falls back to SQLite's built-in unicode61 tokenizer, which does not split Japanese text. Neural embedding search (ruri-v3) still works for semantic matching.
+Without `[ja]`, FTS5 falls back to SQLite's built-in unicode61 tokenizer, which does not split Japanese text. Neural embedding search still works for semantic matching.
 
 ```bash
 # Verify Japanese tokenizer is active
 python -c "from vecmemori._tokenizer import has_tokenizer; print('Japanese FTS5:', has_tokenizer())"
 ```
+
+## Features
+
+- **Dual-strategy hybrid search** — FTS5 + neural embeddings (weighted: 0.40 / 0.60)
+- **🇯🇵 Japanese FTS5** — fugashi (MeCab) tokenizer for Japanese full-text search (install with `vecmemori[ja]`)
+- **Entity resolution** — auto-extracts entities from fact content
+- **Trust scoring** — asymmetric feedback (helpful: +0.05, unhelpful: -0.10)
+- **Temporal decay** — optionally decay older facts
+- **Graceful degradation** — works with numpy only; embeddings and tokenizer optional
+- **Configurable embeddings** — swap any SentenceTransformer model
+- **Retrieval Planner** — optional LLM-driven multi-query search for deeper recall
+- **Algebraic retrieval** — probe (entity), reason (multi-entity AND), contradict (conflict detection)
+- **Hermes Agent integration** — plug-and-play memory provider with auto-prefetch per turn
+- **Auto-extraction** — LLM extracts durable facts from conversation on session end
 
 ## Usage
 
@@ -81,7 +85,7 @@ retriever = FactRetriever(store=store)
 store.add_fact("GPU: RTX 5060 Ti 16GB", category="tool", tags="hardware,gpu")
 store.add_fact("User prefers concise CLI output", category="user_pref")
 
-# Hybrid search
+# Hybrid search (FTS5 + neural embeddings)
 results = retriever.search("gpu memory", limit=5)
 
 # Entity probe
@@ -111,36 +115,34 @@ User sends a message
     ▼
 vecmemori.prefetch(message)
     │
-    ├─► FTS5 + Jaccard + HRR + neural search
+    ├─► FTS5 + neural embedding search
     ├─► Top-N facts (default: 5) selected
     ├─► Injected as "## Vecmemori Memory" section
     └─► Model sees relevant background facts
         before generating a response
 ```
 
-This happens silently — no tool call is needed. The model simply "knows" relevant facts from previous sessions. The `prefetch_limit` config option controls how many facts are injected per turn (default: 5).
+This happens silently — no tool call is needed. The model simply "knows" relevant facts from previous sessions.
 
 ### Memory Storage (fact_store) — On Demand
 
 The model can explicitly save facts using the `fact_store` tool:
 
 ```python
-# Called by the model automatically when it decides
-# something is worth remembering
 fact_store(action="add", content="User prefers Rust for systems programming")
 ```
 
 Key tool actions:
 - `add` — save a new fact (auto-deduplicates by content)
-- `search` — keyword/ semantic search
+- `search` — keyword/semantic search
 - `probe` — entity-centric recall
 - `reason` — find facts connected to multiple entities
 - `contradict` — find contradictory facts
-- `update` / `remove` / `list` — CRUD
+- `update` / `remove` / `list` — CRUD operations
 
-### Memory Tool Mirroring — On Built-in Memory Write
+### Memory Tool Mirroring
 
-When the model uses Hermes' built-in `memory` tool (which writes to MEMORY.md / USER.md), vecmemori automatically mirrors the write as a structured fact:
+When the model uses Hermes' built-in `memory` tool, vecmemori automatically mirrors the write as a structured fact:
 
 ```
 memory(action="add", target="memory", content="...")
@@ -149,7 +151,7 @@ memory(action="add", target="memory", content="...")
     └─► vecmemori mirror: saved as a fact (category: user_pref or general)
 ```
 
-This means facts accumulate even without explicit `fact_store` calls.
+Facts accumulate even without explicit `fact_store` calls.
 
 ### Auto-Extraction — On Session End
 
@@ -166,7 +168,7 @@ vecmemori.on_session_end(messages)
     └─► Each fact is saved via MemoryStore.add_fact()
 ```
 
-The extraction prompt is in Japanese (optimized for the user's environment) and targets:
+The extraction prompt is in Japanese (optimized for Japanese-speaking environments) and targets:
 - User preferences and habits
 - Decisions made
 - Project requirements and progress
@@ -176,7 +178,7 @@ Enable with `auto_extract: true` in config (default: true).
 
 ### Retrieval Planner — Optional Enhancement
 
-When enabled (`retrieval_planner: true`), vecmemori goes beyond single-query search. On each turn, it uses an LLM to generate multiple search queries from the conversation context, fans out retrieval across all of them, and merges results:
+When enabled (`retrieval_planner: true`), vecmemori goes beyond single-query search. On each turn, it uses an LLM to generate multiple search questions from the conversation context, fans out retrieval across all of them, and merges results:
 
 ```
 User message
@@ -214,16 +216,15 @@ This helps discover facts that the current message doesn't directly mention.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `fts_weight` | 0.30 | Keyword precision (BM25) |
-| `jaccard_weight` | 0.10 | Lexical diversity |
-| `hrr_weight` | 0.20 | Symbolic structure |
-| `ruri_weight` | 0.40 | Semantic similarity |
+| `fts_weight` | 0.40 | Keyword precision (BM25) |
+| `ruri_weight` | 0.60 | Semantic similarity (neural embedding) |
 | `db_path` | `memory.db` | SQLite path |
-| `default_trust` | 0.5 | Initial trust score |
-| `hrr_dim` | 1024 | HRR vector dimension |
+| `default_trust` | 0.5 | Initial trust score for new facts |
 | `prefetch_limit` | 5 | Facts injected per turn |
 | `auto_extract` | true | Auto-extract on session end |
 | `retrieval_planner` | false | LLM-driven multi-query search |
+
+When numpy or embedding model is unavailable, weights are redistributed automatically (fallback to single-strategy search).
 
 ## Model Swap
 
@@ -253,17 +254,15 @@ store.rebuild_all_vectors()
 
 ## Architecture
 
-vecmemori combines **4 orthogonal similarity signals** into a final score:
+vecmemori combines **2 orthogonal similarity signals** into a final score:
 
 ```
 User Query
     │
     ▼
 ┌──────────────────────────┐
-│ 1. FTS5 (SQLite BM25)    │  weight=0.30 — keyword match
-│ 2. Jaccard coefficient   │  weight=0.10 — lexical overlap
-│ 3. HRR phase vectors     │  weight=0.20 — symbolic structure
-│ 4. Neural cosine sim     │  weight=0.40 — semantic similarity
+│ 1. FTS5 (SQLite BM25)    │  weight=0.40 — keyword match
+│ 2. Neural cosine sim     │  weight=0.60 — semantic similarity
 └──────────┬───────────────┘
            ▼
     Relevance × Trust × Decay
@@ -277,16 +276,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments / 謝辞
 
-vecmemori stands on the shoulders of several projects and research works. We acknowledge and thank their creators.
-
-### Holographic Reduced Representations
-
-The HRR algorithm implemented in `vecmemori/hrr.py` is based on the seminal work of **Tony A. Plate**:
-
-> Plate, T. A. (1995). *Holographic Reduced Representations*. IEEE Transactions on Neural Networks, 6(3), 623–641.
-> Plate, T. A. (2003). *Holographic Reduced Representation: Distributed Representation for Cognitive Structures*. CSLI Publications.
-
-The implementation in this library is original code written from the mathematical specification. It does not copy from any existing HRR library. The algorithm itself is part of the scientific literature and not subject to copyright restrictions on its use.
+vecmemori stands on the shoulders of several open source projects, research works, and a prior plugin. We acknowledge and thank their creators.
 
 ### Hermes Agent
 
@@ -294,13 +284,14 @@ vecmemori was originally designed as a memory provider for **[Hermes Agent](http
 
 ### The Original Holographic Plugin
 
-vecmemori began as a fork and substantial rewrite of the `holographic` memory plugin bundled with [Hermes Agent](https://github.com/nousresearch/hermes-agent). The original plugin provided hybrid FTS5 + HRR search with entity resolution and trust scoring — vecmemori inherits this architecture.
+vecmemori began as a fork and rewrite of the `holographic` memory plugin bundled with [Hermes Agent](https://github.com/nousresearch/hermes-agent). The original plugin provided hybrid FTS5 + HRR + Jaccard search with entity resolution and trust scoring.
 
 Since the fork, vecmemori has evolved significantly:
-- HRR (Holographic Reduced Representation) and Jaccard similarity have been removed in favor of a focused FTS5 + neural embedding pipeline
+- HRR (Holographic Reduced Representation) and Jaccard similarity have been removed — the system now focuses on a streamlined FTS5 + neural embedding pipeline
 - fugashi (MeCab) Japanese tokenization has been added for proper CJK full-text search
 - The codebase has been extracted into a standalone pip-installable package
 - A new public API (MemoryStore, FactRetriever) replaces the original plugin interface
+- Robust model-agnostic embedding system with configurable dimension and prefixes
 
 The original `holographic` plugin remains available in Hermes Agent under the MIT license. We thank its authors for the foundation.
 
@@ -325,18 +316,18 @@ vecmemori itself is released under the **MIT License** — you are free to use, 
 
 # 日本語
 
-**vecmemori** は AI エージェントのためのローカル・プライベートな事実記憶エンジンです。ユーザーの好み、決定事項、プロジェクト情報などの短い事実を SQLite に保存し、**4系統のハイブリッド検索**（全文検索 + トークン重複 + 記号ベクトル代数 + ニューラル埋め込み）で関連情報を取得します。
+**vecmemori** は AI エージェントのためのローカル・プライベートな事実記憶エンジンです。ユーザーの好み、決定事項、プロジェクト情報などの短い事実を SQLite に保存し、**2系統のハイブリッド検索**（全文検索 + ニューラル埋め込み）で関連情報を取得します。
 
 クラウド型記憶サービスと異なり、vecmemori は完全にあなたのマシン上で動作します。データが外部に送信されることはありません（リモートの埋め込みモデルを使う場合を除く）。
 
 ## インストール
 
 ```bash
-pip install vecmemori               # コア（numpyのみ）
-pip install vecmemori[embed]        # ニューラル埋め込み込み
-pip install vecmemori[ja]           # 日本語FTS5対応（fugashi + unidic-lite）
-pip install vecmemori[all]          # 全部入り
-pip install vecmemori[hermes]       # Hermes Agent プラグイン込み（embed含む）
+pip install vecmemori                        # コア（numpyのみ）
+pip install vecmemori[embed]                 # ニューラル埋め込み込み
+pip install vecmemori[ja]                    # 日本語FTS5対応（fugashi + unidic-lite）
+pip install vecmemori[all]                   # 全部入り
+pip install vecmemori[hermes]                # Hermes Agent プラグイン込み（embed含む）
 ```
 
 ### 日本語FTS5対応
@@ -364,172 +355,31 @@ for r in results:
 
 | 機能 | 説明 |
 |------|------|
-| **4系統ハイブリッド検索** | FTS5 + Jaccard + HRR + 埋め込み（重み: 0.30 / 0.10 / 0.20 / 0.40） |
+| **2系統ハイブリッド検索** | FTS5 + ニューラル埋め込み（重み: 0.40 / 0.60） |
 | **🇯🇵 日本語FTS5** | fugashi（MeCab）による形態素解析で日本語全文検索を実現 |
 | **エンティティ解決** | 事実から自動的に固有名詞を抽出・リンク |
 | **信頼度スコア** | 非対称フィードバック（参考になった: +0.05、参考にならない: -0.10） |
-| **代数検索** | エンティティ検索 / 複数エンティティAND検索 / 構造的隣接発見 / 矛盾検出 |
+| **時間減衰** | 古い事実を減衰させるオプション |
 | **グレースフルデグラデーション** | numpy だけでも動作。埋め込みもトークナイザーもオプション |
 | **モデル差し替え** | 任意の SentenceTransformer モデルに対応 |
-
-## 主なユースケース
-
-vecmemori は以下のようなシナリオで特に威力を発揮します:
-
-- **AI アシスタントの長期記憶** — ユーザーの好みや設定を永続的に保存し、セッションを越えて参照
-- **プロジェクト知識の蓄積** — 技術選定や決定事項を事実として記録
-- **プライバシー重視の環境** — すべてローカルで完結。外部API不要
-- **日本語特化** — ruri-v3 による高精度な日本語意味検索 + fugashi による日本語全文検索
+| **Retrieval Planner** | LLM 駆動の複数クエリ検索で隠れた記憶も発見 |
+| **代数検索** | エンティティ検索 / 複数エンティティAND検索 / 矛盾検出 |
+| **Hermes Agent 連携** | プラグアンドプレイで毎ターン自動プレフェッチ |
+| **自動抽出** | セッション終了時に LLM が会話から事実を抽出 |
 
 ## 設定
 
 | パラメータ | デフォルト | 説明 |
 |-----------|---------|------|
-| `fts_weight` | 0.30 | キーワード精度（BM25） |
-| `jaccard_weight` | 0.10 | 語彙の多様性 |
-| `hrr_weight` | 0.20 | 記号的構造 |
-| `ruri_weight` | 0.40 | 意味的類似度 |
+| `fts_weight` | 0.40 | キーワード精度（BM25） |
+| `ruri_weight` | 0.60 | 意味的類似度（ニューラル埋め込み） |
 | `db_path` | `memory.db` | SQLite データベースパス |
 | `default_trust` | 0.5 | 新規事実の初期信頼度 |
-| `hrr_dim` | 1024 | HRR ベクトル次元数 |
+| `prefetch_limit` | 5 | 毎ターン注入する事実数 |
+| `auto_extract` | true | セッション終了時の自動抽出 |
+| `retrieval_planner` | false | LLM 駆動マルチクエリ検索 |
 
 numpy や埋め込みモデルが利用できない場合、重みは自動的に再配分されます。
-
-## Hermes Agent プラグイン
-
-vecmemori は Hermes Agent のメモリプロバイダーとして動作します:
-
-```bash
-pip install vecmemori[hermes]
-
-# アダプターをプラグインディレクトリに設置
-ln -s $(python -c "import vecmemori; print(vecmemori.__path__[0])")/hermes \
-       ~/.hermes/plugins/vecmemori
-
-# 設定
-hermes config set memory.provider vecmemori
-hermes memory setup
-```
-
-### 旧 holographic プラグインからの移行
-
-SQLite スキーマは同一です。既存の `memory_store.db` をそのまま使うだけで、初回起動時に自動でスキーマ移行（`fts_text` カラム追加・FTS5再構築）が実行されます。
-
-念のため移行前にバックアップを推奨します:
-```bash
-cp ~/.hermes/memory_store.db ~/.hermes/memory_store.db.backup
-```
-
-## Hermes Agent 上の動作
-
-vecmemori は Hermes Agent のメモリプロバイダーとして、会話のあらゆる段階で動作します:
-
-### メモリ読み出し（prefetch）— 毎メッセージ
-
-ユーザーがメッセージを送信するたびに、vecmemori が自動的に事実ストアを検索し、関連する事実をシステムプロンプトに注入します:
-
-```
-ユーザーメッセージ
-    │
-    ▼
-vecmemori.prefetch(message)
-    │
-    ├─► FTS5 + Jaccard + HRR + ニューラル検索
-    ├─► 上位N件（デフォルト: 5件）を選択
-    ├─► 「## Vecmemori Memory」として注入
-    └─► モデルが応答生成前に関連背景情報を参照
-```
-
-これはツールコールなしでサイレントに実行されます。モデルは前のセッションの関連知識を「知っている」状態で応答を生成できます。注入件数は `prefetch_limit` で設定可能（デフォルト: 5）。
-
-### 記憶化（fact_store）— 適宜呼び出し
-
-モデルが「これは覚えておくべき」と判断したときに、`fact_store` ツールで明示的に事実を保存します:
-
-```python
-# モデルが自動的に呼び出す
-fact_store(action="add", content="ユーザーはRustでのシステムプログラミングを好む")
-```
-
-主なツールアクション:
-- `add` — 新規事実を保存（内容で自動重複排除）
-- `search` — キーワード/意味検索
-- `probe` — エンティティ中心の検索
-- `reason` — 複数エンティティに同時に関連する事実を検索
-- `contradict` — 矛盾する事実を検出
-- `update` / `remove` / `list` — CRUD操作
-
-### memory ツールのミラーリング — 内蔵メモリ書き込み時
-
-モデルが Hermes の内蔵 `memory` ツール（MEMORY.md / USER.md への書き込み）を使うと、vecmemori が自動的に同じ内容を構造化事実としてミラーリングします:
-
-```
-memory(action="add", target="memory", content="...")
-    │
-    ├─► 内蔵: MEMORY.md に保存（常時有効）
-    └─► vecmemori ミラー: 事実として保存（カテゴリ: user_pref / general）
-```
-
-これにより、`fact_store` を明示的に呼ばなくても事実が自動的に蓄積されます。
-
-### 自動抽出（auto-extraction）— セッション終了時
-
-セッションが終了すると（CLI終了、/reset、タイムアウト）、vecmemori は直近約40メッセージを LLM に送信し、耐久性のある事実を抽出します:
-
-```
-セッション終了
-    │
-    ▼
-vecmemori.on_session_end(messages)
-    │
-    ├─► LLM が会話 + 抽出プロンプトを受信
-    ├─► LLM が JSON を返却: [{content, category, tags}, ...]
-    └─► 各事実を MemoryStore.add_fact() で保存
-```
-
-抽出プロンプトは日本語で、以下の情報を対象としています:
-- ユーザーの好み・習慣
-- 決定事項
-- プロジェクト要件や進捗
-- ツール・設定に関する選択
-
-設定: `auto_extract: true`（デフォルト: true）。
-
-### Retrieval Planner — オプション機能
-
-`retrieval_planner: true` を有効にすると、毎ターン LLM が会話文脈から複数の検索クエリを生成し、ファンアウト検索して結果を統合します:
-
-```
-ユーザーメッセージ
-    │
-    ▼
-LLM が 3-6 個の検索質問を生成
-    │
-    ├─► 「ユーザーはXについてどう思っていたか？」
-    ├─► 「Yに関する制約は何があったか？」
-    └─► 「Zに関連する過去の決定は？」
-           │
-           ▼
-    各質問 → 個別の検索クエリ
-           │
-           ▼
-    結果を統合・重複排除・スコアリング
-           │
-           ▼
-    上位候補をコンテキストに注入
-```
-
-これにより、現在のメッセージに直接言及されていない事実も発見できます。
-
-### 動作サマリー
-
-| 契機 | 動作 | 設定 |
-|------|------|------|
-| 毎ユーザーメッセージ | 事実検索 → 上位N件注入 | `prefetch_limit`（デフォルト: 5） |
-| モデルが fact_store 呼び出し | 事実の保存/更新/削除 | 常時利用可能 |
-| モデルが memory ツール呼び出し | 自動ミラーリング | 常時有効 |
-| セッション終了 | LLM が事実抽出 | `auto_extract: true` |
-| 毎ターン（planner） | 複数クエリLLM検索 | `retrieval_planner: false` |
 
 ## 埋め込みモデルの差し替え
 
@@ -559,17 +409,15 @@ store.rebuild_all_vectors()
 
 ## アーキテクチャ
 
-vecmemori は **4つの直交する類似度信号** を組み合わせて最終スコアを計算します:
+vecmemori は **2つの直交する類似度信号** を組み合わせて最終スコアを計算します:
 
 ```
 ユーザークエリ
     │
     ▼
 ┌──────────────────────────┐
-│ 1. FTS5 (SQLite BM25)    │  重み=0.30 — キーワード一致
-│ 2. Jaccard 係数          │  重み=0.10 — 語彙の重なり
-│ 3. HRR 位相ベクトル      │  重み=0.20 — 記号的構造
-│ 4. ニューラルcos類似度   │  重み=0.40 — 意味的近さ
+│ 1. FTS5 (SQLite BM25)    │  重み=0.40 — キーワード一致
+│ 2. ニューラルcos類似度   │  重み=0.60 — 意味的近さ
 └──────────┬───────────────┘
            ▼
     関連度 × 信頼度 × 時間減衰
@@ -585,22 +433,22 @@ MIT — [LICENSE](LICENSE) 参照。
 
 vecmemori は以下のプロジェクトや研究の上に成り立っています。
 
-### Holographic Reduced Representations
-
-`vecmemori/hrr.py` に実装された HRR アルゴリズムは **Tony A. Plate** の先駆的な研究に基づいています:
-
-> Plate, T. A. (1995). *Holographic Reduced Representations*. IEEE Transactions on Neural Networks, 6(3), 623–641.
-> Plate, T. A. (2003). *Holographic Reduced Representation: Distributed Representation for Cognitive Structures*. CSLI Publications.
-
-このライブラリの実装は数学的仕様から独自に書かれたオリジナルコードです。既存の HRR ライブラリからのコピーは含みません。アルゴリズム自体は学術文献の一部であり、その利用に著作権上の制限はありません。
-
 ### Hermes Agent
 
 vecmemori は元々 **[Hermes Agent](https://github.com/nousresearch/hermes-agent)**（**Nous Research** 開発）のメモリプロバイダーとして設計されました。`vecmemori/hermes/` アダプターモジュールは、vecmemori を Hermes Agent のメモリプロバイダーシステムに接続するための薄い互換レイヤーです。拡張可能なエージェントプラットフォームを提供してくださった Nous Research に感謝します。
 
 ### オリジナル Holographic プラグイン
 
-vecmemori のアーキテクチャ（FTS5 + HRR + 信頼度スコア + エンティティ解決のハイブリッド）は、Hermes Agent にバンドルされていた `holographic` メモリプラグインに触発されたものです。vecmemori は **フォークではありません** — 独自のコードベース、API、追加機能（fugashi 日本語トークナイズ、設定可能な埋め込みモデル、スタンドアロン pip パッケージ）を持つ独立した再実装です。オリジナルのプラグインは Hermes Agent のプラグインディレクトリで MIT ライセンスのまま利用可能です。
+vecmemori は Hermes Agent にバンドルされていた `holographic` メモリプラグインのフォークとして始まり、その後大幅に書き換えられました。オリジナルのプラグインは FTS5 + HRR + Jaccard のハイブリッド検索、エンティティ解決、信頼度スコアを提供していました。
+
+フォーク以降の主な変更:
+- HRR（Holographic Reduced Representation）と Jaccard 類似度を削除 — FTS5 + ニューラル埋め込みに特化
+- fugashi（MeCab）による日本語トークナイゼーションを追加
+- スタンドアロンの pip インストール可能なパッケージとして独立
+- 新しい公開 API（MemoryStore, FactRetriever）を提供
+- 次元・プレフィックス設定可能なモデル非依存の埋め込みシステム
+
+オリジナルの `holographic` プラグインは Hermes Agent で MIT ライセンスのまま利用可能です。
 
 ### 日本語トークナイゼーション（fugashi + MeCab）
 
