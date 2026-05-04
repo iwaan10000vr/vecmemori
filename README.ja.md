@@ -133,6 +133,7 @@ hermes config set plugins.vecmemori.embedding_model "$HOME/.cache/vecmemori/mode
 
 ```bash
 hermes config set plugins.vecmemori.auto_extract true
+hermes config set plugins.vecmemori.fact_storage_language ja   # 保存するfact本文の言語
 hermes config set plugins.vecmemori.retrieval_planner false
 hermes config set plugins.vecmemori.embedding_trust_remote_code false
 ```
@@ -163,6 +164,7 @@ Hermes専用 tool action:
 - `ruri_weight`: 意味埋め込みスコアの重み。デフォルト `0.60`（互換性のため旧キー名を維持）
 - `prefetch_limit`: Hermesで毎ターン注入するfact数。デフォルト `5`
 - `auto_extract`: Hermesでセッション終了時にLLM抽出を行うか
+- `fact_storage_language`: 保存するfact本文の言語（例: `ja`, `en`）。未設定/null/auto の場合はfact書き込みを拒否し、先にどの言語で保存するかユーザーへ確認する。固有名詞、コード、パス、製品名、自然な専門用語は原語表記を保持する。
 - `retrieval_planner`: HermesでLLMによるマルチクエリ検索を使うか
 - `embedding_model`: ローカル埋め込みモデルパス
 - `embedding_trust_remote_code`: Hugging Face custom model code を許可するか。デフォルト `false`

@@ -133,6 +133,7 @@ Optional local-first settings:
 
 ```bash
 hermes config set plugins.vecmemori.auto_extract true
+hermes config set plugins.vecmemori.fact_storage_language ja   # language used to write stored fact content
 hermes config set plugins.vecmemori.retrieval_planner false
 hermes config set plugins.vecmemori.embedding_trust_remote_code false
 ```
@@ -163,6 +164,7 @@ Common options:
 - `ruri_weight`: semantic embedding score weight, default `0.60` (legacy config key name)
 - `prefetch_limit`: Hermes facts injected per turn, default `5`
 - `auto_extract`: Hermes LLM extraction on session end, default depends on plugin config
+- `fact_storage_language`: language used to write stored fact content (for example `ja` or `en`). If unset/null/auto, vecmemori refuses fact writes and the agent should ask the user which language to use first. Proper nouns, code, paths, product names, and natural technical terms are preserved.
 - `retrieval_planner`: Hermes LLM multi-query retrieval, default `false`
 - `embedding_model`: local embedding model path
 - `embedding_trust_remote_code`: allow Hugging Face custom model code, default `false`
