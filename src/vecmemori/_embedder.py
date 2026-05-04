@@ -6,16 +6,18 @@ Both store.py and retrieval.py import this to reuse the same model instance.
 Lazy-loaded on first use — no startup cost if embeddings are not configured.
 """
 
+from functools import lru_cache
+
 try:
     import numpy as np
     from sentence_transformers import SentenceTransformer
     import torch
-    from functools import lru_cache
-    from pathlib import Path
     _HAS_DEPS = True
 except ImportError:
     _HAS_DEPS = False
-    SentenceTransformer = None  # type: ignore
+    SentenceTransformer = object  # type: ignore[assignment,misc]
+
+from pathlib import Path
 
 _model = None  # module-level singleton
 _MODEL_PATH = Path.home() / ".hermes" / "models" / "ruri-v3-310m"

@@ -145,9 +145,8 @@ class VecmemoriMemoryProvider(MemoryProvider):
         return [
             {"key": "db_path", "description": "SQLite database path", "default": _default_db},
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "true", "choices": ["true", "false"]},
-            {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
-            {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
-            {"key": "embedding_weight", "description": "Neural embedding weight in hybrid search (0.0=disabled)", "default": "0.40"},
+        {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
+        {"key": "embedding_weight", "description": "Neural embedding weight in hybrid search (0.0=disabled)", "default": "0.60"},
             {"key": "embedding_model", "description": "Local embedding model path/name", "default": _default_embedder},
             {"key": "embedding_keep_alive", "description": "Model keep-alive: -1=always, 0=unload after search, N=keep N sec", "default": "-1"},
             {"key": "auto_extract_llm", "description": "Use LLM for auto-extraction instead of regex", "default": "true", "choices": ["true", "false"]},
@@ -172,12 +171,8 @@ class VecmemoriMemoryProvider(MemoryProvider):
             db_path = db_path.replace("${HERMES_HOME}", _hermes_home)
 
         default_trust = float(self._config.get("default_trust", 0.5))
-        hrr_dim = int(self._config.get("hrr_dim", 1024))
-        hrr_weight = float(self._config.get("hrr_weight", 0.20))
-        embedding_weight = float(self._config.get("embedding_weight",
-                                self._config.get("ruri_weight", 0.40)))
-        embedding_keep_alive = int(self._config.get("embedding_keep_alive",
-                                   self._config.get("ruri_keep_alive", -1)))
+        embedding_weight = float(self._config.get("embedding_weight", 0.60))
+        embedding_keep_alive = int(self._config.get("embedding_keep_alive", -1))
         temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
 
         embedding_model = self._config.get("embedding_model",
@@ -191,14 +186,12 @@ class VecmemoriMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("Failed to configure embedding model path %r: %s", embedding_model, e)
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, hrr_dim=hrr_dim)
+        self._store = MemoryStore(db_path=db_path, default_trust=default_trust)
         self._retriever = FactRetriever(
             store=self._store,
             temporal_decay_half_life=temporal_decay,
-            hrr_weight=hrr_weight,
             ruri_weight=embedding_weight,
             ruri_keep_alive=embedding_keep_alive,
-            hrr_dim=hrr_dim,
         )
         self._session_id = session_id
 
@@ -515,38 +508,61 @@ class VecmemoriMemoryProvider(MemoryProvider):
                 return json.dumps({"results": results, "count": len(results)})
 
             elif action == "probe":
-                results = retriever.probe(
-                    args["entity"],
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
+                # probe is an alias for entity-focused search
+                entity = args.get("entity", "")
+                if entity:
+                    results = retriever.search(
+                        entity,
+                        category=args.get("category"),
+                        min_trust=float(args.get("min_trust", self._min_trust)),
+                        limit=int(args.get("limit", 10)),
+                    )
+                else:
+                    results = []
                 return json.dumps({"results": results, "count": len(results)})
 
             elif action == "related":
-                results = retriever.related(
-                    args["entity"],
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
+                entity = args.get("entity", "")
+                if entity:
+                    results = retriever.search(
+                        entity,
+                        category=args.get("category"),
+                        min_trust=float(args.get("min_trust", self._min_trust)),
+                        limit=int(args.get("limit", 10)),
+                    )
+                else:
+                    results = []
                 return json.dumps({"results": results, "count": len(results)})
 
             elif action == "reason":
                 entities = args.get("entities", [])
                 if not entities:
                     return tool_error("reason requires 'entities' list")
-                results = retriever.reason(
-                    entities,
-                    category=args.get("category"),
-                    limit=int(args.get("limit", 10)),
-                )
-                return json.dumps({"results": results, "count": len(results)})
+                # Search for each entity and union results
+                seen: set[int] = set()
+                merged: list[dict] = []
+                for entity in entities:
+                    for result in retriever.search(
+                        entity,
+                        category=args.get("category"),
+                        min_trust=float(args.get("min_trust", self._min_trust)),
+                        limit=int(args.get("limit", 10)),
+                    ):
+                        fid = result.get("fact_id")
+                        if fid not in seen:
+                            seen.add(fid)
+                            merged.append(result)
+                return json.dumps({"results": merged, "count": len(merged)})
 
             elif action == "contradict":
-                results = retriever.contradict(
+                # Contradiction detection requires entity overlap analysis;
+                # fall back to listing recent facts for manual inspection
+                results = store.list_facts(
                     category=args.get("category"),
+                    min_trust=float(args.get("min_trust", 0.0)),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "note": "contradict() not available in this version"})
 
             elif action == "update":
                 updated = store.update_fact(

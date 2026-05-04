@@ -294,7 +294,15 @@ vecmemori was originally designed as a memory provider for **[Hermes Agent](http
 
 ### The Original Holographic Plugin
 
-vecmemori's architecture (hybrid FTS5 + HRR + trust scoring + entity resolution) was inspired by the `holographic` memory plugin bundled with Hermes Agent. vecmemori is **not a fork** — it is a standalone reimplementation with its own codebase, API, and additional features (fugashi Japanese tokenization, configurable embedding models, standalone pip package). The original plugin remains available in Hermes Agent's plugin directory under the MIT license.
+vecmemori began as a fork and substantial rewrite of the `holographic` memory plugin bundled with [Hermes Agent](https://github.com/nousresearch/hermes-agent). The original plugin provided hybrid FTS5 + HRR search with entity resolution and trust scoring — vecmemori inherits this architecture.
+
+Since the fork, vecmemori has evolved significantly:
+- HRR (Holographic Reduced Representation) and Jaccard similarity have been removed in favor of a focused FTS5 + neural embedding pipeline
+- fugashi (MeCab) Japanese tokenization has been added for proper CJK full-text search
+- The codebase has been extracted into a standalone pip-installable package
+- A new public API (MemoryStore, FactRetriever) replaces the original plugin interface
+
+The original `holographic` plugin remains available in Hermes Agent under the MIT license. We thank its authors for the foundation.
 
 ### Japanese Tokenization (fugashi + MeCab)
 

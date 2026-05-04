@@ -10,18 +10,13 @@ import threading
 from pathlib import Path
 
 try:
-    from . import hrr
-except ImportError:
-    import vecmemori.hrr as hrr  # type: ignore[no-redef]
-
-try:
     import numpy as np
-    from ._ruri import encode_doc
+    from ._embedder import encode_doc
     _HAS_RURI = True
 except ImportError:
     _HAS_RURI = False
 
-from ._tokenizer import tokenize, tokenize_query, has_tokenizer
+from ._tokenizer import tokenize, tokenize_query
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -35,7 +30,7 @@ CREATE TABLE IF NOT EXISTS facts (
     helpful_count   INTEGER DEFAULT 0,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    hrr_vector      BLOB
+    ruri_embedding  BLOB
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -73,15 +68,6 @@ CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
     INSERT INTO facts_fts(rowid, content, tags)
         VALUES (new.fact_id, new.fts_text, new.tags);
 END;
-
-CREATE TABLE IF NOT EXISTS memory_banks (
-    bank_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    bank_name  TEXT NOT NULL UNIQUE,
-    vector     BLOB NOT NULL,
-    dim        INTEGER NOT NULL,
-    fact_count INTEGER DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
 """
 
 # Trust adjustment constants
@@ -112,7 +98,6 @@ class MemoryStore:
         self,
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
-        hrr_dim: int = 1024,
     ) -> None:
         if db_path is None:
             from hermes_constants import get_hermes_home
@@ -120,8 +105,6 @@ class MemoryStore:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.default_trust = _clamp_trust(default_trust)
-        self.hrr_dim = hrr_dim
-        self._hrr_available = hrr._HAS_NUMPY
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
@@ -149,8 +132,6 @@ class MemoryStore:
         if "fts_text" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN fts_text TEXT DEFAULT ''")
             needs_fts_rebuild = True
-        if "hrr_vector" not in columns:
-            self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         if "ruri_embedding" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN ruri_embedding BLOB")
 
@@ -158,11 +139,7 @@ class MemoryStore:
             self._backfill_fts_text()
             self._rebuild_fts()
         else:
-            # Ensure triggers are correct (old DB may have legacy triggers
-            # that use new.content instead of new.fts_text)
             self._ensure_triggers()
-            # Still ensure FTS5 is populated for any facts that may have
-            # been added with a null fts_text (e.g. from external tools)
             self._ensure_fts_consistency()
 
         self._conn.commit()
@@ -192,41 +169,28 @@ class MemoryStore:
         logger.info("Backfilled fts_text for %d facts", len(rows))
 
     def _rebuild_fts(self) -> None:
-        """Drop and recreate the FTS5 virtual table, then populate from fts_text.
-
-        Called during migration when the FTS5 schema changes (e.g. removal of
-        the external content reference).
-        """
-        # Drop old FTS5 table (safe — no data loss since we re-populate)
+        """Drop and recreate the FTS5 virtual table, then populate from fts_text."""
         self._conn.executescript("DROP TABLE IF EXISTS facts_fts;")
-        # Recreate with new schema (no external content reference)
         self._conn.executescript("""
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
                 USING fts5(content, tags);
         """)
-        # Populate from facts
         self._conn.execute(
             """INSERT INTO facts_fts(rowid, content, tags)
                SELECT fact_id, fts_text, tags FROM facts
                WHERE fts_text IS NOT NULL AND fts_text != ''"""
         )
-        # Drop existing triggers before recreating — IF NOT EXISTS won't replace
         self._conn.executescript("""
             DROP TRIGGER IF EXISTS facts_ai;
             DROP TRIGGER IF EXISTS facts_ad;
             DROP TRIGGER IF EXISTS facts_au;
-        """)
-        # Create triggers (now safe — old ones are gone)
-        self._conn.executescript("""
             CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
                 INSERT INTO facts_fts(rowid, content, tags)
                     VALUES (new.fact_id, new.fts_text, new.tags);
             END;
-
             CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
                 DELETE FROM facts_fts WHERE rowid = old.fact_id;
             END;
-
             CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
                 DELETE FROM facts_fts WHERE rowid = old.fact_id;
                 INSERT INTO facts_fts(rowid, content, tags)
@@ -238,12 +202,7 @@ class MemoryStore:
         logger.info("Rebuilt FTS5 with %d facts", count)
 
     def _ensure_fts_consistency(self) -> None:
-        """Ensure all facts have corresponding FTS5 entries.
-
-        Handles edge cases where facts exist but fts_text is NULL/empty
-        (e.g. from external database writes or partial migration).
-        """
-        # Backfill any facts missing fts_text
+        """Ensure all facts have corresponding FTS5 entries."""
         rows = self._conn.execute(
             "SELECT fact_id, content FROM facts WHERE fts_text IS NULL OR fts_text = ''"
         ).fetchall()
@@ -256,7 +215,6 @@ class MemoryStore:
                 )
             self._conn.commit()
 
-        # Check count parity between facts and FTS5
         fact_count = self._conn.execute("SELECT count(*) FROM facts").fetchone()[0]
         fts_count = self._conn.execute("SELECT count(*) FROM facts_fts").fetchone()[0]
         if fts_count < fact_count:
@@ -267,11 +225,7 @@ class MemoryStore:
             self._rebuild_fts()
 
     def _ensure_triggers(self) -> None:
-        """Drop and recreate triggers to ensure they use new.fts_text.
-
-        Needed for databases created before the fugashi integration,
-        which had triggers referencing new.content and old.content.
-        """
+        """Drop and recreate triggers to ensure they use new.fts_text."""
         self._conn.executescript("""
             DROP TRIGGER IF EXISTS facts_ai;
             DROP TRIGGER IF EXISTS facts_ad;
@@ -313,7 +267,6 @@ class MemoryStore:
             if not content:
                 raise ValueError("content must not be empty")
 
-            # Pre-tokenize with fugashi for FTS5 indexing
             fts_text = tokenize(content)
 
             try:
@@ -327,21 +280,16 @@ class MemoryStore:
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
                 return int(row["fact_id"])
 
-            # Entity extraction and linking
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
 
-            # Compute HRR vector after entity linking
-            self._compute_hrr_vector(fact_id, content)
             self._compute_ruri_embedding(fact_id, content)
-            self._rebuild_bank(category)
 
             return fact_id
 
@@ -364,7 +312,6 @@ class MemoryStore:
             if not query:
                 return []
 
-            # Tokenize query for FTS5 — enables Japanese keyword search
             fts_query = tokenize_query(query)
 
             params: list = [fts_query, min_trust]
@@ -415,11 +362,10 @@ class MemoryStore:
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, trust_score, category FROM facts WHERE fact_id = ?", (fact_id,)
+                "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
             ).fetchone()
             if row is None:
                 return False
-            old_category = row["category"]
 
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
@@ -427,7 +373,6 @@ class MemoryStore:
             if content is not None:
                 assignments.append("content = ?")
                 params.append(content.strip())
-                # Also recompute fts_text
                 fts_text = tokenize(content.strip())
                 assignments.append("fts_text = ?")
                 params.append(fts_text)
@@ -449,7 +394,6 @@ class MemoryStore:
             )
             self._conn.commit()
 
-            # If content changed, re-extract entities
             if content is not None:
                 self._conn.execute(
                     "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
@@ -459,17 +403,7 @@ class MemoryStore:
                     self._link_fact_entity(fact_id, entity_id)
                 self._conn.commit()
 
-            # Recompute HRR vector if content changed
-            if content is not None:
-                self._compute_hrr_vector(fact_id, content)
                 self._compute_ruri_embedding(fact_id, content)
-            # Rebuild bank for relevant category
-            cat = category or self._conn.execute(
-                "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()["category"]
-            if category is not None and category != old_category:
-                self._rebuild_bank(old_category)
-            self._rebuild_bank(cat)
 
             return True
 
@@ -477,7 +411,7 @@ class MemoryStore:
         """Delete a fact and its entity links. Returns True if the row existed."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, category FROM facts WHERE fact_id = ?", (fact_id,)
+                "SELECT fact_id FROM facts WHERE fact_id = ?", (fact_id,)
             ).fetchone()
             if row is None:
                 return False
@@ -487,7 +421,6 @@ class MemoryStore:
             )
             self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._conn.commit()
-            self._rebuild_bank(row["category"])
             return True
 
     def list_facts(
@@ -566,16 +499,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _extract_entities(self, text: str) -> list[str]:
-        """Extract entity candidates from text using simple regex rules.
-
-        Rules applied (in order):
-        1. Capitalized multi-word phrases  e.g. "John Doe"
-        2. Double-quoted terms             e.g. "Python"
-        3. Single-quoted terms             e.g. 'pytest'
-        4. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
-
-        Returns a deduplicated list preserving first-seen order.
-        """
+        """Extract entity candidates from text using simple regex rules."""
         seen: set[str] = set()
         candidates: list[str] = []
 
@@ -587,13 +511,10 @@ class MemoryStore:
 
         for m in _RE_CAPITALIZED.finditer(text):
             _add(m.group(1))
-
         for m in _RE_DOUBLE_QUOTE.finditer(text):
             _add(m.group(1))
-
         for m in _RE_SINGLE_QUOTE.finditer(text):
             _add(m.group(1))
-
         for m in _RE_AKA.finditer(text):
             _add(m.group(1))
             _add(m.group(2))
@@ -605,14 +526,12 @@ class MemoryStore:
 
         Returns the entity_id.
         """
-        # Exact name match
         row = self._conn.execute(
             "SELECT entity_id FROM entities WHERE name LIKE ?", (name,)
         ).fetchone()
         if row is not None:
             return int(row["entity_id"])
 
-        # Search aliases — aliases stored as comma-separated; use LIKE with % boundaries
         alias_row = self._conn.execute(
             """
             SELECT entity_id FROM entities
@@ -623,7 +542,6 @@ class MemoryStore:
         if alias_row is not None:
             return int(alias_row["entity_id"])
 
-        # Create new entity
         cur = self._conn.execute(
             "INSERT INTO entities (name) VALUES (?)", (name,)
         )
@@ -640,30 +558,6 @@ class MemoryStore:
             (fact_id, entity_id),
         )
         self._conn.commit()
-
-    def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
-        """Compute and store HRR vector for a fact. No-op if numpy unavailable."""
-        with self._lock:
-            if not self._hrr_available:
-                return
-
-            # Get entities linked to this fact
-            rows = self._conn.execute(
-                """
-                SELECT e.name FROM entities e
-                JOIN fact_entities fe ON fe.entity_id = e.entity_id
-                WHERE fe.fact_id = ?
-                """,
-                (fact_id,),
-            ).fetchall()
-            entities = [row["name"] for row in rows]
-
-            vector = hrr.encode_fact(content, entities, self.hrr_dim)
-            self._conn.execute(
-                "UPDATE facts SET hrr_vector = ? WHERE fact_id = ?",
-                (hrr.phases_to_bytes(vector), fact_id),
-            )
-            self._conn.commit()
 
     def _compute_ruri_embedding(self, fact_id: int, content: str) -> None:
         """Compute and store ruri-v3 embedding for a fact. No-op if unavailable."""
@@ -683,69 +577,19 @@ class MemoryStore:
             except Exception as e:
                 logger.debug("Failed to compute ruri embedding for fact_id=%s: %s", fact_id, e)
 
-    def _rebuild_bank(self, category: str) -> None:
-        """Full rebuild of a category's memory bank from all its fact vectors."""
-        with self._lock:
-            if not self._hrr_available:
-                return
-
-            bank_name = f"cat:{category}"
-            rows = self._conn.execute(
-                "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL",
-                (category,),
-            ).fetchall()
-
-            if not rows:
-                self._conn.execute("DELETE FROM memory_banks WHERE bank_name = ?", (bank_name,))
-                self._conn.commit()
-                return
-
-            vectors = [hrr.bytes_to_phases(row["hrr_vector"]) for row in rows]
-            bank_vector = hrr.bundle(*vectors)
-            fact_count = len(vectors)
-
-            # Check SNR
-            hrr.snr_estimate(self.hrr_dim, fact_count)
-
-            self._conn.execute(
-                """
-                INSERT INTO memory_banks (bank_name, vector, dim, fact_count, updated_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(bank_name) DO UPDATE SET
-                    vector = excluded.vector,
-                    dim = excluded.dim,
-                    fact_count = excluded.fact_count,
-                    updated_at = excluded.updated_at
-                """,
-                (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
-            )
-            self._conn.commit()
-
-    def rebuild_all_vectors(self, dim: int | None = None) -> int:
-        """Recompute all HRR vectors + banks from text. For recovery/migration.
+    def rebuild_all_embeddings(self) -> int:
+        """Recompute all ruri-v3 embeddings from text. For recovery/migration.
 
         Returns the number of facts processed.
         """
+        if not _HAS_RURI:
+            return 0
         with self._lock:
-            if not self._hrr_available:
-                return 0
-
-            if dim is not None:
-                self.hrr_dim = dim
-
             rows = self._conn.execute(
-                "SELECT fact_id, content, category FROM facts"
+                "SELECT fact_id, content FROM facts"
             ).fetchall()
-
-            categories: set[str] = set()
             for row in rows:
-                self._compute_hrr_vector(row["fact_id"], row["content"])
                 self._compute_ruri_embedding(row["fact_id"], row["content"])
-                categories.add(row["category"])
-
-            for category in categories:
-                self._rebuild_bank(category)
-
             return len(rows)
 
     # ------------------------------------------------------------------
@@ -753,11 +597,9 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        """Convert a sqlite3.Row to a plain dict."""
         return dict(row)
 
     def close(self) -> None:
-        """Close the database connection."""
         self._conn.close()
 
     def __enter__(self) -> "MemoryStore":
