@@ -22,8 +22,7 @@ pytest tests/
 
 - `src/vecmemori/` — Core library (pure Python + numpy)
   - `store.py` — SQLite fact store
-  - `retrieval.py` — Hybrid search pipeline
-  - `hrr.py` — HRR vector symbolic algebra
+  - `retrieval.py` — Dual-strategy search pipeline (FTS5 + neural embeddings)
   - `_embedder.py` — Embedding model wrapper
 - `src/vecmemori/hermes/` — Optional Hermes Agent adapter
 
