@@ -41,19 +41,33 @@ for r in results:
 ## Features
 
 - **4-strategy hybrid search** — FTS5 + Jaccard + HRR + neural embeddings (weighted: 0.30 / 0.10 / 0.20 / 0.40)
+- **🇯🇵 Japanese FTS5** — fugashi (MeCab) tokenizer for Japanese full-text search (install with `vecmemori[ja]`)
 - **Entity resolution** — auto-extracts entities from fact content
 - **Trust scoring** — asymmetric feedback (helpful: +0.05, unhelpful: -0.10)
 - **Algebraic retrieval** — probe, reason, related, contradict
 - **Temporal decay** — optionally decay older facts
-- **Graceful degradation** — works with numpy only; embeddings optional
+- **Graceful degradation** — works with numpy only; embeddings and tokenizer optional
 - **Configurable embeddings** — swap any SentenceTransformer model
 
 ## Installation
 
 ```bash
-pip install vecmemori            # core (numpy only)
-pip install vecmemori[embed]     # with neural embeddings
-pip install vecmemori[hermes]    # with Hermes Agent plugin
+pip install vecmemori               # core (numpy only)
+pip install vecmemori[embed]        # with neural embeddings
+pip install vecmemori[ja]           # with Japanese FTS5 (fugashi + unidic-lite)
+pip install vecmemori[all]          # everything
+pip install vecmemori[hermes]       # with Hermes Agent plugin (includes embed)
+```
+
+### Japanese FTS5 support
+
+vecmemori uses [fugashi](https://github.com/polm/fugashi) (MeCab) to tokenize Japanese text before indexing it in FTS5. This enables proper keyword search for Japanese queries — searching `"ダークモード"` finds facts containing `"ダーク"` or `"モード"` individually.
+
+Without `[ja]`, FTS5 falls back to SQLite's built-in unicode61 tokenizer, which does not split Japanese text. Neural embedding search (ruri-v3) still works for semantic matching.
+
+```bash
+# Verify Japanese tokenizer is active
+python -c "from vecmemori._tokenizer import has_tokenizer; print('Japanese FTS5:', has_tokenizer())"
 ```
 
 ## Usage
@@ -243,10 +257,18 @@ MIT — see [LICENSE](LICENSE).
 ## インストール
 
 ```bash
-pip install vecmemori            # コア（numpyのみ）
-pip install vecmemori[embed]     # ニューラル埋め込み込み
-pip install vecmemori[hermes]    # Hermes Agent プラグイン込み
+pip install vecmemori               # コア（numpyのみ）
+pip install vecmemori[embed]        # ニューラル埋め込み込み
+pip install vecmemori[ja]           # 日本語FTS5対応（fugashi + unidic-lite）
+pip install vecmemori[all]          # 全部入り
+pip install vecmemori[hermes]       # Hermes Agent プラグイン込み（embed含む）
 ```
+
+### 日本語FTS5対応
+
+vecmemori は [fugashi](https://github.com/polm/fugashi)（MeCab）を使って日本語テキストを形態素解析し、FTS5 にインデックスします。`"ダークモード"` で検索すると `"ダーク"` や `"モード"` に分割されてヒットします。
+
+`[ja]` なしの場合は SQLite 標準の unicode61 トークナイザーにフォールバックします（日本語は分割されません）。意味検索（ruri-v3）は別系統として独立して動作します。
 
 ## クイックスタート
 
@@ -315,7 +337,12 @@ hermes memory setup
 
 ### 旧 holographic プラグインからの移行
 
-`~/.hermes/user-docs/vecmemori/migration.md` に完全な移行手順があります。SQLite スキーマは同一のため、データ変換は不要です。
+SQLite スキーマは同一です。既存の `memory_store.db` をそのまま使うだけで、初回起動時に自動でスキーマ移行（`fts_text` カラム追加・FTS5再構築）が実行されます。
+
+念のため移行前にバックアップを推奨します:
+```bash
+cp ~/.hermes/memory_store.db ~/.hermes/memory_store.db.backup
+```
 
 ## Hermes Agent 上の動作
 

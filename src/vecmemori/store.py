@@ -21,10 +21,13 @@ try:
 except ImportError:
     _HAS_RURI = False
 
+from ._tokenizer import tokenize, tokenize_query, has_tokenizer
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
     fact_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     content         TEXT NOT NULL UNIQUE,
+    fts_text        TEXT DEFAULT '',  -- fugashi-tokenized text for FTS5 search
     category        TEXT DEFAULT 'general',
     tags            TEXT DEFAULT '',
     trust_score     REAL DEFAULT 0.5,
@@ -54,23 +57,21 @@ CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_entities_name  ON entities(name);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
-    USING fts5(content, tags, content=facts, content_rowid=fact_id);
+    USING fts5(content, tags);
 
 CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
     INSERT INTO facts_fts(rowid, content, tags)
-        VALUES (new.fact_id, new.content, new.tags);
+        VALUES (new.fact_id, new.fts_text, new.tags);
 END;
 
 CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, content, tags)
-        VALUES ('delete', old.fact_id, old.content, old.tags);
+    DELETE FROM facts_fts WHERE rowid = old.fact_id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, content, tags)
-        VALUES ('delete', old.fact_id, old.content, old.tags);
+    DELETE FROM facts_fts WHERE rowid = old.fact_id;
     INSERT INTO facts_fts(rowid, content, tags)
-        VALUES (new.fact_id, new.content, new.tags);
+        VALUES (new.fact_id, new.fts_text, new.tags);
 END;
 
 CREATE TABLE IF NOT EXISTS memory_banks (
@@ -135,16 +136,160 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create tables, indexes, and triggers if they do not exist. Enable WAL mode."""
+        """Create tables, indexes, and triggers if they do not exist. Enable WAL mode.
+
+        Handles schema migration for existing databases: adds fts_text column,
+        backfills tokenized text, and rebuilds the FTS5 virtual table.
+        """
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
+        # Migrate: add missing columns (safe for existing databases)
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
+        needs_fts_rebuild = False
+        if "fts_text" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN fts_text TEXT DEFAULT ''")
+            needs_fts_rebuild = True
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         if "ruri_embedding" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN ruri_embedding BLOB")
+
+        if needs_fts_rebuild:
+            self._backfill_fts_text()
+            self._rebuild_fts()
+        else:
+            # Ensure triggers are correct (old DB may have legacy triggers
+            # that use new.content instead of new.fts_text)
+            self._ensure_triggers()
+            # Still ensure FTS5 is populated for any facts that may have
+            # been added with a null fts_text (e.g. from external tools)
+            self._ensure_fts_consistency()
+
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # FTS5 migration helpers
+    # ------------------------------------------------------------------
+
+    def _backfill_fts_text(self) -> None:
+        """Tokenize existing fact content using fugashi.
+
+        Called during migration when fts_text column is first added.
+        Processes facts that have NULL or empty fts_text.
+        """
+        rows = self._conn.execute(
+            "SELECT fact_id, content FROM facts WHERE fts_text IS NULL OR fts_text = ''"
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            tok = tokenize(row["content"])
+            self._conn.execute(
+                "UPDATE facts SET fts_text = ? WHERE fact_id = ?",
+                (tok, row["fact_id"]),
+            )
+        self._conn.commit()
+        logger.info("Backfilled fts_text for %d facts", len(rows))
+
+    def _rebuild_fts(self) -> None:
+        """Drop and recreate the FTS5 virtual table, then populate from fts_text.
+
+        Called during migration when the FTS5 schema changes (e.g. removal of
+        the external content reference).
+        """
+        # Drop old FTS5 table (safe — no data loss since we re-populate)
+        self._conn.executescript("DROP TABLE IF EXISTS facts_fts;")
+        # Recreate with new schema (no external content reference)
+        self._conn.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts
+                USING fts5(content, tags);
+        """)
+        # Populate from facts
+        self._conn.execute(
+            """INSERT INTO facts_fts(rowid, content, tags)
+               SELECT fact_id, fts_text, tags FROM facts
+               WHERE fts_text IS NOT NULL AND fts_text != ''"""
+        )
+        # Drop existing triggers before recreating — IF NOT EXISTS won't replace
+        self._conn.executescript("""
+            DROP TRIGGER IF EXISTS facts_ai;
+            DROP TRIGGER IF EXISTS facts_ad;
+            DROP TRIGGER IF EXISTS facts_au;
+        """)
+        # Create triggers (now safe — old ones are gone)
+        self._conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+                INSERT INTO facts_fts(rowid, content, tags)
+                    VALUES (new.fact_id, new.fts_text, new.tags);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+                DELETE FROM facts_fts WHERE rowid = old.fact_id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+                DELETE FROM facts_fts WHERE rowid = old.fact_id;
+                INSERT INTO facts_fts(rowid, content, tags)
+                    VALUES (new.fact_id, new.fts_text, new.tags);
+            END;
+        """)
+        self._conn.commit()
+        count = self._conn.execute("SELECT count(*) FROM facts_fts").fetchone()[0]
+        logger.info("Rebuilt FTS5 with %d facts", count)
+
+    def _ensure_fts_consistency(self) -> None:
+        """Ensure all facts have corresponding FTS5 entries.
+
+        Handles edge cases where facts exist but fts_text is NULL/empty
+        (e.g. from external database writes or partial migration).
+        """
+        # Backfill any facts missing fts_text
+        rows = self._conn.execute(
+            "SELECT fact_id, content FROM facts WHERE fts_text IS NULL OR fts_text = ''"
+        ).fetchall()
+        if rows:
+            for row in rows:
+                tok = tokenize(row["content"])
+                self._conn.execute(
+                    "UPDATE facts SET fts_text = ? WHERE fact_id = ?",
+                    (tok, row["fact_id"]),
+                )
+            self._conn.commit()
+
+        # Check count parity between facts and FTS5
+        fact_count = self._conn.execute("SELECT count(*) FROM facts").fetchone()[0]
+        fts_count = self._conn.execute("SELECT count(*) FROM facts_fts").fetchone()[0]
+        if fts_count < fact_count:
+            logger.warning(
+                "FTS5 table has %d entries but facts has %d — rebuilding",
+                fts_count, fact_count,
+            )
+            self._rebuild_fts()
+
+    def _ensure_triggers(self) -> None:
+        """Drop and recreate triggers to ensure they use new.fts_text.
+
+        Needed for databases created before the fugashi integration,
+        which had triggers referencing new.content and old.content.
+        """
+        self._conn.executescript("""
+            DROP TRIGGER IF EXISTS facts_ai;
+            DROP TRIGGER IF EXISTS facts_ad;
+            DROP TRIGGER IF EXISTS facts_au;
+            CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+                INSERT INTO facts_fts(rowid, content, tags)
+                    VALUES (new.fact_id, new.fts_text, new.tags);
+            END;
+            CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+                DELETE FROM facts_fts WHERE rowid = old.fact_id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+                DELETE FROM facts_fts WHERE rowid = old.fact_id;
+                INSERT INTO facts_fts(rowid, content, tags)
+                    VALUES (new.fact_id, new.fts_text, new.tags);
+            END;
+        """)
+        logger.debug("Triggers recreated to use new.fts_text")
 
     # ------------------------------------------------------------------
     # Public API
@@ -158,6 +303,7 @@ class MemoryStore:
     ) -> int:
         """Insert a fact and return its fact_id.
 
+        Automatically tokenizes content with fugashi for FTS5 Japanese search.
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
@@ -167,13 +313,16 @@ class MemoryStore:
             if not content:
                 raise ValueError("content must not be empty")
 
+            # Pre-tokenize with fugashi for FTS5 indexing
+            fts_text = tokenize(content)
+
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO facts (content, fts_text, category, tags, trust_score)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (content, fts_text, category, tags, self.default_trust),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -205,15 +354,20 @@ class MemoryStore:
     ) -> list[dict]:
         """Full-text search over facts using FTS5.
 
-        Returns a list of fact dicts ordered by FTS5 rank, then trust_score
-        descending. Also increments retrieval_count for matched facts.
+        Query is automatically tokenized with fugashi (when available) for
+        Japanese keyword matching. Returns a list of fact dicts ordered by
+        FTS5 rank, then trust_score descending. Also increments retrieval_count
+        for matched facts.
         """
         with self._lock:
             query = query.strip()
             if not query:
                 return []
 
-            params: list = [query, min_trust]
+            # Tokenize query for FTS5 — enables Japanese keyword search
+            fts_query = tokenize_query(query)
+
+            params: list = [fts_query, min_trust]
             category_clause = ""
             if category is not None:
                 category_clause = "AND f.category = ?"
@@ -273,6 +427,10 @@ class MemoryStore:
             if content is not None:
                 assignments.append("content = ?")
                 params.append(content.strip())
+                # Also recompute fts_text
+                fts_text = tokenize(content.strip())
+                assignments.append("fts_text = ?")
+                params.append(fts_text)
             if tags is not None:
                 assignments.append("tags = ?")
                 params.append(tags)

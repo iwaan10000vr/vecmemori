@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from ._tokenizer import tokenize_query, has_tokenizer
+
 try:
     from . import hrr
 except ImportError:
@@ -641,7 +643,9 @@ class FactRetriever:
         # We need to join facts_fts with facts to get all columns
         params: list = []
         where_clauses = ["facts_fts MATCH ?"]
-        params.append(query)
+        # Tokenize query for FTS5 — enables Japanese keyword search
+        fts_query = tokenize_query(query)
+        params.append(fts_query)
 
         if category:
             where_clauses.append("f.category = ?")
