@@ -1,4 +1,4 @@
-!/usr/bin/env bash
+#!/usr/bin/env bash
 # Download embedding model for vecmemori.
 # Default: cl-nagoya/ruri-v3-310m (~1.2 GB)
 #
@@ -6,13 +6,13 @@
 #   bash scripts/download_model.sh                  # ruri-v3-310m (default)
 #   bash scripts/download_model.sh <model-name>     # custom model
 #
-# Output: ~/.hermes/models/<model-name>/  (or $VECMEMORI_MODELS_DIR/<model-name>/)
+# Output: ~/.cache/vecmemori/models/<model-name>/  (or $VECMEMORI_MODELS_DIR/<model-name>/)
 
 set -euo pipefail
 
 MODEL="${1:-cl-nagoya/ruri-v3-310m}"
 MODEL_SHORT="${MODEL##*/}"
-INSTALL_DIR="${VECMEMORI_MODELS_DIR:-$HOME/.hermes/models}"
+INSTALL_DIR="${VECMEMORI_MODELS_DIR:-$HOME/.cache/vecmemori/models}"
 
 if [ -d "$INSTALL_DIR/$MODEL_SHORT" ]; then
     echo "✓ Model already exists at $INSTALL_DIR/$MODEL_SHORT"

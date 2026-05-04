@@ -3,7 +3,7 @@
 Provides lazy-loading access to a SentenceTransformer-compatible embedding model.
 Supports configurable asymmetric prefixes and dimension detection.
 Both store.py and retrieval.py import this to reuse the same model instance.
-Lazy-loaded on first use — no startup cost if embeddings are not configured.
+Lazy-loaded on first use so importing vecmemori has no startup cost.
 """
 
 from functools import lru_cache
@@ -20,10 +20,11 @@ except ImportError:
 from pathlib import Path
 
 _model = None  # module-level singleton
-_MODEL_PATH = Path.home() / ".hermes" / "models" / "ruri-v3-310m"
+_MODEL_PATH = Path.home() / ".cache" / "vecmemori" / "models" / "ruri-v3-310m"
 _DIMENSION = 768  # default for ruri-v3-310m; auto-detected on first load
 _QUERY_PREFIX = "検索クエリ: "
 _DOC_PREFIX = "検索文書: "
+_TRUST_REMOTE_CODE = False
 
 
 def set_model_path(path: str | Path) -> None:
@@ -37,6 +38,7 @@ def set_model_path(path: str | Path) -> None:
     if new_path == _MODEL_PATH:
         return
     _MODEL_PATH = new_path
+    encode_query_cached.cache_clear()
     if _model is not None:
         unload_model()
 
@@ -55,12 +57,18 @@ def set_config(
         doc_prefix: Prefix for document-side encoding (default: '検索文書: ').
     """
     global _DIMENSION, _QUERY_PREFIX, _DOC_PREFIX
-    if dimension is not None:
+    changed = False
+    if dimension is not None and dimension != _DIMENSION:
         _DIMENSION = dimension
-    if query_prefix is not None:
+        changed = True
+    if query_prefix is not None and query_prefix != _QUERY_PREFIX:
         _QUERY_PREFIX = query_prefix
-    if doc_prefix is not None:
+        changed = True
+    if doc_prefix is not None and doc_prefix != _DOC_PREFIX:
         _DOC_PREFIX = doc_prefix
+        changed = True
+    if changed:
+        encode_query_cached.cache_clear()
 
 
 def get_model() -> SentenceTransformer | None:
@@ -71,7 +79,7 @@ def get_model() -> SentenceTransformer | None:
             _model = SentenceTransformer(
                 str(_MODEL_PATH),
                 device="cuda" if torch.cuda.is_available() else "cpu",
-                trust_remote_code=True,
+                trust_remote_code=_TRUST_REMOTE_CODE,
                 local_files_only=True,
             )
         except Exception:
@@ -98,13 +106,9 @@ def encode_query(text: str) -> np.ndarray | None:
 
 
 @lru_cache(maxsize=3)
-def encode_query_cached(text: str) -> np.ndarray:
-    """Cached query embedding — same text within a turn skips recomputation.
-
-    Returns a zero vector on failure (never returns None), safe for dot product.
-    """
-    vec = encode_query(text)
-    return vec if vec is not None else np.zeros(_DIMENSION, dtype=np.float32)
+def encode_query_cached(text: str) -> np.ndarray | None:
+    """Cached query embedding — same text within a turn skips recomputation."""
+    return encode_query(text)
 
 
 def unload_model() -> bool:
@@ -169,3 +173,24 @@ def encode_queries(texts: list[str], batch_size: int = 32) -> list[np.ndarray] |
 def get_dimension() -> int:
     """Return the configured embedding dimension."""
     return _DIMENSION
+
+
+def set_trust_remote_code(value: bool) -> None:
+    """Allow or disallow custom model code execution when loading embeddings.
+
+    Defaults to False for public/package safety. Set True only for models that
+    explicitly require custom code and that you trust.
+    """
+    global _TRUST_REMOTE_CODE, _model
+    new_value = bool(value)
+    if new_value == _TRUST_REMOTE_CODE:
+        return
+    _TRUST_REMOTE_CODE = new_value
+    encode_query_cached.cache_clear()
+    if _model is not None:
+        unload_model()
+
+
+def is_available() -> bool:
+    """Return True only when an embedding model can actually be loaded."""
+    return get_model() is not None

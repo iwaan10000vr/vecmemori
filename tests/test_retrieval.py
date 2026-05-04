@@ -1,8 +1,8 @@
 """Tests for the FactRetriever (hybrid search pipeline).
 
-Note: These tests run without ruri-v3 embeddings (not installed in test venv).
-The retriever auto-redistributes ruri_weight to FTS5 when ruri
-is unavailable, so search quality is maintained.
+Note: Most tests use explicit require_embeddings=False fixtures so CI can run
+without downloading a large local embedding model. Production defaults require
+embeddings.
 """
 
 import pytest
@@ -47,10 +47,10 @@ class TestFactRetrieverBasic:
         assert scores == sorted(scores, reverse=True), "Results not sorted by score"
 
     def test_search_strips_binary(self, populated_retriever):
-        """ruri_embedding must be stripped from output."""
+        """Embedding blobs must be stripped from output."""
         results = populated_retriever.search("dark")
         for r in results:
-            assert "ruri_embedding" not in r, "ruri_embedding leaked"
+            assert "ruri_embedding" not in r, "embedding blob leaked"
 
     def test_search_cjk_fallback(self, populated_retriever):
         """CJK query that doesn't match FTS5 should still work via fallback."""
@@ -73,6 +73,15 @@ class TestFactRetrieverBasic:
 
     def test_temporal_decay(self, populated_retriever):
         """Temporal decay should not crash when enabled."""
-        retriever = FactRetriever(store=populated_retriever.store, temporal_decay_half_life=30)
+        retriever = FactRetriever(store=populated_retriever.store, temporal_decay_half_life=30, require_embeddings=False)
         results = retriever.search("dark mode")
         assert isinstance(results, list)
+
+
+def test_retriever_requires_embeddings_by_default(monkeypatch, store):
+    """Default retriever mode should fail closed when embeddings are unavailable."""
+    import vecmemori.retrieval as retrieval_module
+
+    monkeypatch.setattr(retrieval_module, "_HAS_EMBEDDER_MODULE", False)
+    with pytest.raises(RuntimeError, match="Embedding model is required"):
+        FactRetriever(store=store)

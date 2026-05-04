@@ -76,7 +76,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## sentence-transformers — Apache License 2.0
 
-sentence-transformers is an optional dependency (`vecmemori[embed]`).
+sentence-transformers is a core dependency used for neural embedding search.
 
 ```
                                  Apache License
@@ -287,7 +287,7 @@ sentence-transformers is an optional dependency (`vecmemori[embed]`).
 
 ## PyTorch — Modified BSD (see below)
 
-PyTorch is an optional dependency (`vecmemori[embed]`).
+PyTorch is a core dependency used through sentence-transformers for neural embedding search.
 
 PyTorch is licensed under a BSD-style license. The full text is available at:
 https://github.com/pytorch/pytorch/blob/main/LICENSE

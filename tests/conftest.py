@@ -21,7 +21,7 @@ def db_path():
 @pytest.fixture
 def store(db_path):
     """MemoryStore instance backed by a temp DB."""
-    s = MemoryStore(db_path=db_path, default_trust=0.5)
+    s = MemoryStore(db_path=db_path, default_trust=0.5, require_embeddings=False)
     yield s
     s.close()
 
@@ -44,10 +44,10 @@ def populated_store(store):
 @pytest.fixture
 def retriever(store):
     """FactRetriever with default weights."""
-    return FactRetriever(store=store)
+    return FactRetriever(store=store, require_embeddings=False)
 
 
 @pytest.fixture
 def populated_retriever(populated_store):
     """FactRetriever on a populated store."""
-    return FactRetriever(store=populated_store)
+    return FactRetriever(store=populated_store, require_embeddings=False)

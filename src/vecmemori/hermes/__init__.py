@@ -34,16 +34,16 @@ logger = logging.getLogger(__name__)
 FACT_STORE_SCHEMA = {
     "name": "fact_store",
     "description": (
-        "Deep structured memory with algebraic reasoning. "
+        "Structured semantic fact memory. "
         "Use alongside the memory tool — memory for always-on context, "
-        "fact_store for deep recall and compositional queries.\n\n"
+        "fact_store for explicit fact storage and retrieval.\n\n"
         "ACTIONS (simple → powerful):\n"
         "• add — Store a fact the user would expect you to remember.\n"
         "• search — Keyword lookup ('editor config', 'deploy process').\n"
         "• probe — Entity recall: ALL facts about a person/thing.\n"
-        "• related — What connects to an entity? Structural adjacency.\n"
-        "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
-        "• contradict — Memory hygiene: find facts making conflicting claims.\n"
+        "• related — Entity-adjacent recall using semantic search.\n"
+        "• reason — Search for facts related to multiple supplied entities.\n"
+        "• contradict — List candidate facts for manual conflict inspection.\n"
         "• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
@@ -149,6 +149,7 @@ class VecmemoriMemoryProvider(MemoryProvider):
         {"key": "embedding_weight", "description": "Neural embedding weight in hybrid search (0.0=disabled)", "default": "0.60"},
             {"key": "embedding_model", "description": "Local embedding model path/name", "default": _default_embedder},
             {"key": "embedding_keep_alive", "description": "Model keep-alive: -1=always, 0=unload after search, N=keep N sec", "default": "-1"},
+            {"key": "embedding_trust_remote_code", "description": "Allow custom HuggingFace model code execution", "default": "false", "choices": ["true", "false"]},
             {"key": "auto_extract_llm", "description": "Use LLM for auto-extraction instead of regex", "default": "true", "choices": ["true", "false"]},
             {"key": "auto_extract_model", "description": "Model for LLM auto-extraction (empty = use main model)", "default": ""},
             {"key": "retrieval_planner", "description": "Use LLM question-driven planning for multi-query search", "default": "false", "choices": ["true", "false"]},
@@ -181,17 +182,19 @@ class VecmemoriMemoryProvider(MemoryProvider):
             embedding_model = embedding_model.replace("$HERMES_HOME", _hermes_home)
             embedding_model = embedding_model.replace("${HERMES_HOME}", _hermes_home)
             try:
-                from vecmemori._embedder import set_model_path
+                from vecmemori._embedder import set_model_path, set_trust_remote_code
                 set_model_path(embedding_model)
+                set_trust_remote_code(self._as_bool(self._config.get("embedding_trust_remote_code", False)))
             except Exception as e:
                 logger.debug("Failed to configure embedding model path %r: %s", embedding_model, e)
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust)
+        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, require_embeddings=True)
         self._retriever = FactRetriever(
             store=self._store,
             temporal_decay_half_life=temporal_decay,
             ruri_weight=embedding_weight,
             ruri_keep_alive=embedding_keep_alive,
+            require_embeddings=True,
         )
         self._session_id = session_id
 
@@ -538,7 +541,8 @@ class VecmemoriMemoryProvider(MemoryProvider):
                 entities = args.get("entities", [])
                 if not entities:
                     return tool_error("reason requires 'entities' list")
-                # Search for each entity and union results
+                # Search for each entity and union results. This is not symbolic
+                # reasoning; it is a pragmatic multi-query semantic recall.
                 seen: set[int] = set()
                 merged: list[dict] = []
                 for entity in entities:
@@ -562,7 +566,7 @@ class VecmemoriMemoryProvider(MemoryProvider):
                     min_trust=float(args.get("min_trust", 0.0)),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results), "note": "contradict() not available in this version"})
+                return json.dumps({"results": results, "count": len(results), "note": "Automatic contradiction detection is not available in this version; returned candidates for manual inspection."})
 
             elif action == "update":
                 updated = store.update_fact(

@@ -1,6 +1,6 @@
 """Hybrid keyword/neural retrieval for the memory store.
 
-Combines FTS5 full-text search with neural embedding (ruri-v3) similarity.
+Combines FTS5 full-text search with neural embedding similarity.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from ._tokenizer import tokenize_query
 
 try:
     import numpy as np
-    from ._embedder import encode_query_cached
-    _HAS_RURI = True
+    from ._embedder import encode_query_cached, is_available as embedding_is_available
+    _HAS_EMBEDDER_MODULE = True
 except ImportError:
-    _HAS_RURI = False
+    _HAS_EMBEDDER_MODULE = False
 
 
 class FactRetriever:
@@ -35,13 +35,21 @@ class FactRetriever:
         fts_weight: float = 0.40,
         ruri_weight: float = 0.60,
         ruri_keep_alive: int = -1,  # -1=always loaded, 0=unload after search, N=keep N seconds
+        require_embeddings: bool = True,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
         self._ruri_keep_alive = ruri_keep_alive
+        self.require_embeddings = require_embeddings
 
-        # Auto-redistribute if ruri unavailable
-        if ruri_weight > 0 and not _HAS_RURI:
+        if ruri_weight > 0 and require_embeddings and not self._embedding_available():
+            raise RuntimeError(
+                "Embedding model is required for vecmemori retrieval. Install vecmemori "
+                "and download/configure a local SentenceTransformer model."
+            )
+
+        # Explicit FTS-only mode is available for tests and diagnostics only.
+        if ruri_weight > 0 and not require_embeddings and not self._embedding_available():
             fts_weight += ruri_weight
             ruri_weight = 0.0
 
@@ -60,7 +68,7 @@ class FactRetriever:
 
         Pipeline:
         1. FTS5 search: Get limit*3 candidates from SQLite full-text search
-        2. Neural similarity: ruri-v3 cosine similarity
+        2. Neural similarity: neural embedding cosine similarity
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional)
 
@@ -70,7 +78,7 @@ class FactRetriever:
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
 
         if not candidates:
-            if self.ruri_weight > 0 and _HAS_RURI:
+            if self.ruri_weight > 0 and self._embedding_available():
                 candidates = self._all_facts(category, min_trust, limit * 3)
             if not candidates:
                 return []
@@ -81,14 +89,16 @@ class FactRetriever:
         for fact in candidates:
             fts_score = fact.get("fts_rank", 0.0)
 
-            # ruri-v3 cosine similarity
-            ruri_sim = 0.5  # neutral
+            # Neural cosine similarity. Missing embeddings are not treated as
+            # neutral relevance; they are ignored for the neural component.
+            embedding_sim = 0.0
             if self.ruri_weight > 0 and fact.get("ruri_embedding"):
                 query_emb = self._get_query_embedding(query)
                 fact_emb = np.frombuffer(fact["ruri_embedding"], dtype=np.float32)
-                ruri_sim = float(np.dot(query_emb, fact_emb))
+                if query_emb.shape == fact_emb.shape:
+                    embedding_sim = float(np.dot(query_emb, fact_emb))
 
-            relevance = self.fts_weight * fts_score + self.ruri_weight * ruri_sim
+            relevance = self.fts_weight * fts_score + self.ruri_weight * embedding_sim
             score = relevance * fact["trust_score"]
 
             if self.half_life > 0:
@@ -97,9 +107,9 @@ class FactRetriever:
             fact["score"] = score
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "search q=%r fact#%d: fts=%.3f ruri=%.3f trust=%.2f → %.4f",
+                    "search q=%r fact#%d: fts=%.3f embedding=%.3f trust=%.2f → %.4f",
                     query[:40], fact["fact_id"],
-                    fts_score, ruri_sim,
+                    fts_score, embedding_sim,
                     fact["trust_score"], score,
                 )
             scored.append(fact)
@@ -109,21 +119,23 @@ class FactRetriever:
         for fact in results:
             fact.pop("ruri_embedding", None)
 
-        if self._ruri_keep_alive == 0 and _HAS_RURI:
+        if self._ruri_keep_alive == 0 and _HAS_EMBEDDER_MODULE:
             from ._embedder import unload_model
             unload_model()
         return results
 
+    def _embedding_available(self) -> bool:
+        return _HAS_EMBEDDER_MODULE and embedding_is_available()
+
     def _get_query_embedding(self, query: str) -> "np.ndarray":
-        """Compute and cache ruri-v3 query embedding for the current search."""
-        if not _HAS_RURI:
-            return np.zeros(768, dtype=np.float32)
+        """Compute and cache query embedding for the current search."""
+        if not _HAS_EMBEDDER_MODULE:
+            raise RuntimeError("Embedding dependencies are not installed")
         if self._query_embedding is None:
-            try:
-                vec = encode_query_cached(query)
-                self._query_embedding = vec if vec is not None else np.zeros(768, dtype=np.float32)
-            except Exception:
-                return np.zeros(768, dtype=np.float32)
+            vec = encode_query_cached(query)
+            if vec is None:
+                raise RuntimeError("Embedding model failed to encode query")
+            self._query_embedding = vec
         return self._query_embedding
 
     def _all_facts(
@@ -134,7 +146,7 @@ class FactRetriever:
     ) -> list[dict]:
         """Fallback: get all facts when FTS5 returns nothing.
 
-        Uses a generous multiplier to ensure ruri-v3 has enough candidates.
+        Uses a generous multiplier to ensure neural search has enough candidates.
         """
         conn = self.store._conn
         where = ["f.trust_score >= ?"]

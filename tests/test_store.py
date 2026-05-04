@@ -126,3 +126,16 @@ class TestMemoryStoreEntities:
         ).fetchall()
         names = {r["name"].lower() for r in rows}
         assert "alice" in names or "arch linux" in names
+
+
+def test_store_requires_embeddings_by_default(monkeypatch, db_path):
+    """Default store mode should fail closed when embeddings are unavailable."""
+    import vecmemori.store as store_module
+
+    monkeypatch.setattr(store_module, "_HAS_EMBEDDER_MODULE", False)
+    s = MemoryStore(db_path=db_path)
+    try:
+        with pytest.raises(RuntimeError, match="Embedding dependencies are required"):
+            s.add_fact("Embedding required")
+    finally:
+        s.close()

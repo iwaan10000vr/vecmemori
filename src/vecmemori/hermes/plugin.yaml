@@ -1,5 +1,5 @@
 name: vecmemori
 version: 0.1.0
-description: "vecmemori — Hybrid memory engine with FTS5 + HRR + neural embeddings. Local SQLite fact store with trust scoring and compositional retrieval."
+description: "vecmemori — local SQLite fact memory with FTS5 + neural embedding retrieval, trust scoring, Japanese tokenization support, and Hermes Agent integration."
 hooks:
   - on_session_end

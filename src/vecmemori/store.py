@@ -12,9 +12,9 @@ from pathlib import Path
 try:
     import numpy as np
     from ._embedder import encode_doc
-    _HAS_RURI = True
+    _HAS_EMBEDDER_MODULE = True
 except ImportError:
-    _HAS_RURI = False
+    _HAS_EMBEDDER_MODULE = False
 
 from ._tokenizer import tokenize, tokenize_query
 
@@ -98,13 +98,14 @@ class MemoryStore:
         self,
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
+        require_embeddings: bool = True,
     ) -> None:
         if db_path is None:
-            from hermes_constants import get_hermes_home
-            db_path = str(get_hermes_home() / "memory_store.db")
+            db_path = "memory.db"
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.default_trust = _clamp_trust(default_trust)
+        self.require_embeddings = require_embeddings
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
@@ -268,14 +269,15 @@ class MemoryStore:
                 raise ValueError("content must not be empty")
 
             fts_text = tokenize(content)
+            embedding_blob = self._encode_doc_blob(content)
 
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, fts_text, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO facts (content, fts_text, category, tags, trust_score, ruri_embedding)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (content, fts_text, category, tags, self.default_trust),
+                    (content, fts_text, category, tags, self.default_trust, embedding_blob),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -288,8 +290,6 @@ class MemoryStore:
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
-
-            self._compute_ruri_embedding(fact_id, content)
 
             return fact_id
 
@@ -559,30 +559,62 @@ class MemoryStore:
         )
         self._conn.commit()
 
+    def _encode_doc_blob(self, content: str) -> bytes | None:
+        """Encode content and return an embedding blob.
+
+        Embeddings are required by default because vecmemori is intended to be
+        a semantic memory system, not only a keyword-search store. Tests and
+        deliberate FTS-only experiments may pass require_embeddings=False.
+        """
+        if not content:
+            return None
+        if not _HAS_EMBEDDER_MODULE:
+            if self.require_embeddings:
+                raise RuntimeError(
+                    "Embedding dependencies are required. Install vecmemori "
+                    "and download/configure a SentenceTransformer model."
+                )
+            return None
+        try:
+            vec = encode_doc(content)
+            if vec is None:
+                if self.require_embeddings:
+                    raise RuntimeError(
+                        "Embedding model is unavailable. Download/configure a local "
+                        "SentenceTransformer model or pass require_embeddings=False "
+                        "for explicit FTS-only testing."
+                    )
+                return None
+            return vec.tobytes()
+        except Exception:
+            if self.require_embeddings:
+                raise
+            logger.debug("Failed to encode document embedding", exc_info=True)
+            return None
+
     def _compute_ruri_embedding(self, fact_id: int, content: str) -> None:
-        """Compute and store ruri-v3 embedding for a fact. No-op if unavailable."""
-        if not _HAS_RURI or not content:
-            return
+        """Compute and store embedding for a fact."""
         with self._lock:
             try:
-                vec = encode_doc(content)
-                if vec is None:
+                blob = self._encode_doc_blob(content)
+                if blob is None:
                     return
-                blob = vec.tobytes()
                 self._conn.execute(
                     "UPDATE facts SET ruri_embedding = ? WHERE fact_id = ?",
                     (blob, fact_id),
                 )
                 self._conn.commit()
             except Exception as e:
-                logger.debug("Failed to compute ruri embedding for fact_id=%s: %s", fact_id, e)
+                logger.debug("Failed to compute embedding for fact_id=%s: %s", fact_id, e)
+                if self.require_embeddings:
+                    raise
 
     def rebuild_all_embeddings(self) -> int:
-        """Recompute all ruri-v3 embeddings from text. For recovery/migration.
+        """Recompute all embeddings from text. For recovery/migration.
 
         Returns the number of facts processed.
         """
-        if not _HAS_RURI:
+        if not _HAS_EMBEDDER_MODULE and not self.require_embeddings:
             return 0
         with self._lock:
             rows = self._conn.execute(

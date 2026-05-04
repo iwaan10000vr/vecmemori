@@ -1,0 +1,12 @@
+include README.md
+include README.ja.md
+include LICENSE
+include NOTICE
+include THIRD_PARTY_NOTICES.md
+include CONTRIBUTING.md
+include scripts/download_model.sh
+recursive-include src/vecmemori/hermes *.yaml
+recursive-include tests *.py
+prune .venv
+prune dist
+prune build
