@@ -16,7 +16,7 @@ try:
 except ImportError:
     _HAS_EMBEDDER_MODULE = False
 
-from ._tokenizer import tokenize, tokenize_query, LANG_AUTO
+from ._tokenizer import tokenize, tokenize_query
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -98,7 +98,6 @@ class MemoryStore:
         self,
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
-        default_language: str = LANG_AUTO,
         require_embeddings: bool = True,
     ) -> None:
         if db_path is None:
@@ -106,7 +105,6 @@ class MemoryStore:
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.default_trust = _clamp_trust(default_trust)
-        self.default_language = default_language
         self.require_embeddings = require_embeddings
         self._conn: sqlite3.Connection = sqlite3.connect(
             str(self.db_path),
@@ -163,7 +161,7 @@ class MemoryStore:
         if not rows:
             return
         for row in rows:
-            tok = tokenize(row["content"], language=self.default_language)
+            tok = tokenize(row["content"])
             self._conn.execute(
                 "UPDATE facts SET fts_text = ? WHERE fact_id = ?",
                 (tok, row["fact_id"]),
@@ -211,7 +209,7 @@ class MemoryStore:
         ).fetchall()
         if rows:
             for row in rows:
-                tok = tokenize(row["content"], language=self.default_language)
+                tok = tokenize(row["content"])
                 self._conn.execute(
                     "UPDATE facts SET fts_text = ? WHERE fact_id = ?",
                     (tok, row["fact_id"]),
@@ -257,16 +255,10 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
-        language: str = LANG_AUTO,
     ) -> int:
         """Insert a fact and return its fact_id.
 
         Automatically tokenizes content with fugashi for FTS5 Japanese search.
-        The language parameter controls tokenization:
-          - "auto": detect Japanese vs English (default)
-          - "ja": force fugashi tokenization
-          - "en": skip tokenization, unicode61 handles English
-
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
@@ -276,8 +268,7 @@ class MemoryStore:
             if not content:
                 raise ValueError("content must not be empty")
 
-            lang = language if language else self.default_language
-            fts_text = tokenize(content, language=lang)
+            fts_text = tokenize(content)
             embedding_blob = self._encode_doc_blob(content)
 
             try:
@@ -308,23 +299,20 @@ class MemoryStore:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
-        language: str = LANG_AUTO,
     ) -> list[dict]:
         """Full-text search over facts using FTS5.
 
         Query is automatically tokenized with fugashi (when available) for
-        Japanese keyword matching. The language parameter mirrors add_fact.
-
-        Returns a list of fact dicts ordered by FTS5 rank, then trust_score
-        descending. Also increments retrieval_count for matched facts.
+        Japanese keyword matching. Returns a list of fact dicts ordered by
+        FTS5 rank, then trust_score descending. Also increments retrieval_count
+        for matched facts.
         """
         with self._lock:
             query = query.strip()
             if not query:
                 return []
 
-            lang = language if language else self.default_language
-            fts_query = tokenize_query(query, language=lang)
+            fts_query = tokenize_query(query)
 
             params: list = [fts_query, min_trust]
             category_clause = ""
@@ -367,12 +355,8 @@ class MemoryStore:
         trust_delta: float | None = None,
         tags: str | None = None,
         category: str | None = None,
-        language: str | None = None,
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
-
-        When updating content, the language parameter controls re-tokenization.
-        If None, the store's default_language is used.
 
         Returns True if the row existed, False otherwise.
         """
@@ -389,8 +373,7 @@ class MemoryStore:
             if content is not None:
                 assignments.append("content = ?")
                 params.append(content.strip())
-                lang = language if language is not None else self.default_language
-                fts_text = tokenize(content.strip(), language=lang)
+                fts_text = tokenize(content.strip())
                 assignments.append("fts_text = ?")
                 params.append(fts_text)
             if tags is not None:

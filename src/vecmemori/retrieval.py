@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-from ._tokenizer import tokenize_query, LANG_AUTO
+from ._tokenizer import tokenize_query
 
 try:
     import numpy as np
@@ -63,7 +63,6 @@ class FactRetriever:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
-        language: str = LANG_AUTO,
     ) -> list[dict]:
         """Hybrid search: FTS5 candidates → neural rerank → trust weighting.
 
@@ -76,7 +75,7 @@ class FactRetriever:
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
         self._query_embedding = None
-        candidates = self._fts_candidates(query, category, min_trust, limit * 3, language)
+        candidates = self._fts_candidates(query, category, min_trust, limit * 3)
 
         if not candidates:
             if self.ruri_weight > 0 and self._embedding_available():
@@ -169,7 +168,6 @@ class FactRetriever:
         category: str | None,
         min_trust: float,
         limit: int,
-        language: str = LANG_AUTO,
     ) -> list[dict]:
         """Get raw FTS5 candidates from the store.
 
@@ -180,7 +178,7 @@ class FactRetriever:
 
         params: list = []
         where_clauses = ["facts_fts MATCH ?"]
-        fts_query = tokenize_query(query, language=language)
+        fts_query = tokenize_query(query)
         params.append(fts_query)
 
         if category:

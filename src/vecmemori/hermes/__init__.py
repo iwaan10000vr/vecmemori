@@ -10,7 +10,6 @@ Config (under plugins.vecmemori in config.yaml):
     auto_extract           Auto-extract facts at session end (default: true)
     auto_extract_model     Model for LLM extraction (empty = main model)
     default_trust          Default trust score for new facts (default: 0.5)
-    default_language       Fact tokenization language: auto, ja, en (default: auto)
     retrieval_planner      Use LLM question-driven multi-query search (default: false)
 """
 
@@ -25,7 +24,6 @@ from tools.registry import tool_error
 from hermes_cli.config import cfg_get
 
 from vecmemori import MemoryStore, FactRetriever
-from vecmemori._tokenizer import LANG_AUTO
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +64,6 @@ FACT_STORE_SCHEMA = {
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
             "limit": {"type": "integer", "description": "Max results (default: 10)."},
-            "language": {"type": "string", "enum": ["auto", "ja", "en"], "description": "Tokenization language: 'auto' detect, 'ja' force fugashi, 'en' pass-through.", "default": "auto"},
         },
         "required": ["action"],
     },
@@ -148,8 +145,7 @@ class VecmemoriMemoryProvider(MemoryProvider):
         return [
             {"key": "db_path", "description": "SQLite database path", "default": _default_db},
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "true", "choices": ["true", "false"]},
-            {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
-            {"key": "default_language", "description": "Fact tokenization language: auto, ja, en", "default": "auto", "choices": ["auto", "ja", "en"]},
+        {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
         {"key": "embedding_weight", "description": "Neural embedding weight in hybrid search (0.0=disabled)", "default": "0.60"},
             {"key": "embedding_model", "description": "Local embedding model path/name", "default": _default_embedder},
             {"key": "embedding_keep_alive", "description": "Model keep-alive: -1=always, 0=unload after search, N=keep N sec", "default": "-1"},
@@ -176,7 +172,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
             db_path = db_path.replace("${HERMES_HOME}", _hermes_home)
 
         default_trust = float(self._config.get("default_trust", 0.5))
-        default_language = self._config.get("default_language", "auto")
         embedding_weight = float(self._config.get("embedding_weight", 0.60))
         embedding_keep_alive = int(self._config.get("embedding_keep_alive", -1))
         temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
@@ -193,7 +188,7 @@ class VecmemoriMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("Failed to configure embedding model path %r: %s", embedding_model, e)
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, default_language=default_language, require_embeddings=True)
+        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, require_embeddings=True)
         self._retriever = FactRetriever(
             store=self._store,
             temporal_decay_half_life=temporal_decay,
@@ -482,7 +477,7 @@ class VecmemoriMemoryProvider(MemoryProvider):
         if action == "add" and self._store and content:
             try:
                 category = "user_pref" if target == "user" else "general"
-                self._store.add_fact(content, category=category, language=self._store.default_language)
+                self._store.add_fact(content, category=category)
             except Exception as e:
                 logger.debug("vecmemori memory_write mirror failed: %s", e)
 
@@ -497,14 +492,12 @@ class VecmemoriMemoryProvider(MemoryProvider):
             action = args["action"]
             store = self._store
             retriever = self._retriever
-            lang = args.get("language", "auto")
 
             if action == "add":
                 fact_id = store.add_fact(
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
-                    language=lang,
                 )
                 return json.dumps({"fact_id": fact_id, "status": "added"})
 
@@ -514,7 +507,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     min_trust=float(args.get("min_trust", self._min_trust)),
                     limit=int(args.get("limit", 10)),
-                    language=lang,
                 )
                 return json.dumps({"results": results, "count": len(results)})
 
@@ -527,7 +519,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
                         category=args.get("category"),
                         min_trust=float(args.get("min_trust", self._min_trust)),
                         limit=int(args.get("limit", 10)),
-                        language=lang,
                     )
                 else:
                     results = []
@@ -541,7 +532,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
                         category=args.get("category"),
                         min_trust=float(args.get("min_trust", self._min_trust)),
                         limit=int(args.get("limit", 10)),
-                        language=lang,
                     )
                 else:
                     results = []
@@ -561,7 +551,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
                         category=args.get("category"),
                         min_trust=float(args.get("min_trust", self._min_trust)),
                         limit=int(args.get("limit", 10)),
-                        language=lang,
                     ):
                         fid = result.get("fact_id")
                         if fid not in seen:
@@ -586,7 +575,6 @@ class VecmemoriMemoryProvider(MemoryProvider):
                     trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
                     tags=args.get("tags"),
                     category=args.get("category"),
-                    language=args.get("language"),
                 )
                 return json.dumps({"updated": updated})
 
