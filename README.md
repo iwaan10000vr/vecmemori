@@ -83,6 +83,119 @@ results = retriever.contradict()
 store.record_feedback(fact_id=42, helpful=True)
 ```
 
+## How It Works with Hermes Agent
+
+When used as a Hermes Agent memory provider (`vecmemori[hermes]`), vecmemori integrates into every stage of the conversation lifecycle:
+
+### Memory Recall (Prefetch) — Every Message
+
+On every user message, vecmemori automatically searches the fact store and injects relevant facts into the system prompt:
+
+```
+User sends a message
+    │
+    ▼
+vecmemori.prefetch(message)
+    │
+    ├─► FTS5 + Jaccard + HRR + neural search
+    ├─► Top-N facts (default: 5) selected
+    ├─► Injected as "## Vecmemori Memory" section
+    └─► Model sees relevant background facts
+        before generating a response
+```
+
+This happens silently — no tool call is needed. The model simply "knows" relevant facts from previous sessions. The `prefetch_limit` config option controls how many facts are injected per turn (default: 5).
+
+### Memory Storage (fact_store) — On Demand
+
+The model can explicitly save facts using the `fact_store` tool:
+
+```python
+# Called by the model automatically when it decides
+# something is worth remembering
+fact_store(action="add", content="User prefers Rust for systems programming")
+```
+
+Key tool actions:
+- `add` — save a new fact (auto-deduplicates by content)
+- `search` — keyword/ semantic search
+- `probe` — entity-centric recall
+- `reason` — find facts connected to multiple entities
+- `contradict` — find contradictory facts
+- `update` / `remove` / `list` — CRUD
+
+### Memory Tool Mirroring — On Built-in Memory Write
+
+When the model uses Hermes' built-in `memory` tool (which writes to MEMORY.md / USER.md), vecmemori automatically mirrors the write as a structured fact:
+
+```
+memory(action="add", target="memory", content="...")
+    │
+    ├─► Built-in: saved to MEMORY.md (always active)
+    └─► vecmemori mirror: saved as a fact (category: user_pref or general)
+```
+
+This means facts accumulate even without explicit `fact_store` calls.
+
+### Auto-Extraction — On Session End
+
+When a session ends (CLI exit, `/reset`, timeout), vecmemori sends the last ~40 messages to an LLM which extracts durable facts:
+
+```
+Session ends
+    │
+    ▼
+vecmemori.on_session_end(messages)
+    │
+    ├─► LLM receives conversation + extraction prompt
+    ├─► LLM returns JSON: [{content, category, tags}, ...]
+    └─► Each fact is saved via MemoryStore.add_fact()
+```
+
+The extraction prompt is in Japanese (optimized for the user's environment) and targets:
+- User preferences and habits
+- Decisions made
+- Project requirements and progress
+- Tool and configuration choices
+
+Enable with `auto_extract: true` in config (default: true).
+
+### Retrieval Planner — Optional Enhancement
+
+When enabled (`retrieval_planner: true`), vecmemori goes beyond single-query search. On each turn, it uses an LLM to generate multiple search queries from the conversation context, fans out retrieval across all of them, and merges results:
+
+```
+User message
+    │
+    ▼
+LLM generates 3-6 search questions
+    │
+    ├─► "What does the user think about X?"
+    ├─► "What constraints were set about Y?"
+    └─► "What past decisions relate to Z?"
+           │
+           ▼
+    Each question → separate search query
+           │
+           ▼
+    Results merged, deduplicated, scored
+           │
+           ▼
+    Top candidates injected into context
+```
+
+This helps discover facts that the current message doesn't directly mention.
+
+### Summary Table
+
+| Trigger | What happens | Config |
+|---------|-------------|--------|
+| Every user message | Search facts → inject top N | `prefetch_limit` (default: 5) |
+| Model calls fact_store | Save/update/delete facts | Always available |
+| Model calls memory tool | Auto-mirror as fact | Always active |
+| Session ends | LLM extracts facts | `auto_extract: true` |
+| Each turn (planner) | Multi-query LLM search | `retrieval_planner: false` |
+
 ## Configuration
 
 | Parameter | Default | Description |
@@ -94,8 +207,9 @@ store.record_feedback(fact_id=42, helpful=True)
 | `db_path` | `memory.db` | SQLite path |
 | `default_trust` | 0.5 | Initial trust score |
 | `hrr_dim` | 1024 | HRR vector dimension |
-
-Weights auto-redistribute when numpy or embeddings are unavailable.
+| `prefetch_limit` | 5 | Facts injected per turn |
+| `auto_extract` | true | Auto-extract on session end |
+| `retrieval_planner` | false | LLM-driven multi-query search |
 
 ## Model Swap
 
@@ -202,6 +316,117 @@ hermes memory setup
 ### 旧 holographic プラグインからの移行
 
 `~/.hermes/user-docs/vecmemori/migration.md` に完全な移行手順があります。SQLite スキーマは同一のため、データ変換は不要です。
+
+## Hermes Agent 上の動作
+
+vecmemori は Hermes Agent のメモリプロバイダーとして、会話のあらゆる段階で動作します:
+
+### メモリ読み出し（prefetch）— 毎メッセージ
+
+ユーザーがメッセージを送信するたびに、vecmemori が自動的に事実ストアを検索し、関連する事実をシステムプロンプトに注入します:
+
+```
+ユーザーメッセージ
+    │
+    ▼
+vecmemori.prefetch(message)
+    │
+    ├─► FTS5 + Jaccard + HRR + ニューラル検索
+    ├─► 上位N件（デフォルト: 5件）を選択
+    ├─► 「## Vecmemori Memory」として注入
+    └─► モデルが応答生成前に関連背景情報を参照
+```
+
+これはツールコールなしでサイレントに実行されます。モデルは前のセッションの関連知識を「知っている」状態で応答を生成できます。注入件数は `prefetch_limit` で設定可能（デフォルト: 5）。
+
+### 記憶化（fact_store）— 適宜呼び出し
+
+モデルが「これは覚えておくべき」と判断したときに、`fact_store` ツールで明示的に事実を保存します:
+
+```python
+# モデルが自動的に呼び出す
+fact_store(action="add", content="ユーザーはRustでのシステムプログラミングを好む")
+```
+
+主なツールアクション:
+- `add` — 新規事実を保存（内容で自動重複排除）
+- `search` — キーワード/意味検索
+- `probe` — エンティティ中心の検索
+- `reason` — 複数エンティティに同時に関連する事実を検索
+- `contradict` — 矛盾する事実を検出
+- `update` / `remove` / `list` — CRUD操作
+
+### memory ツールのミラーリング — 内蔵メモリ書き込み時
+
+モデルが Hermes の内蔵 `memory` ツール（MEMORY.md / USER.md への書き込み）を使うと、vecmemori が自動的に同じ内容を構造化事実としてミラーリングします:
+
+```
+memory(action="add", target="memory", content="...")
+    │
+    ├─► 内蔵: MEMORY.md に保存（常時有効）
+    └─► vecmemori ミラー: 事実として保存（カテゴリ: user_pref / general）
+```
+
+これにより、`fact_store` を明示的に呼ばなくても事実が自動的に蓄積されます。
+
+### 自動抽出（auto-extraction）— セッション終了時
+
+セッションが終了すると（CLI終了、/reset、タイムアウト）、vecmemori は直近約40メッセージを LLM に送信し、耐久性のある事実を抽出します:
+
+```
+セッション終了
+    │
+    ▼
+vecmemori.on_session_end(messages)
+    │
+    ├─► LLM が会話 + 抽出プロンプトを受信
+    ├─► LLM が JSON を返却: [{content, category, tags}, ...]
+    └─► 各事実を MemoryStore.add_fact() で保存
+```
+
+抽出プロンプトは日本語で、以下の情報を対象としています:
+- ユーザーの好み・習慣
+- 決定事項
+- プロジェクト要件や進捗
+- ツール・設定に関する選択
+
+設定: `auto_extract: true`（デフォルト: true）。
+
+### Retrieval Planner — オプション機能
+
+`retrieval_planner: true` を有効にすると、毎ターン LLM が会話文脈から複数の検索クエリを生成し、ファンアウト検索して結果を統合します:
+
+```
+ユーザーメッセージ
+    │
+    ▼
+LLM が 3-6 個の検索質問を生成
+    │
+    ├─► 「ユーザーはXについてどう思っていたか？」
+    ├─► 「Yに関する制約は何があったか？」
+    └─► 「Zに関連する過去の決定は？」
+           │
+           ▼
+    各質問 → 個別の検索クエリ
+           │
+           ▼
+    結果を統合・重複排除・スコアリング
+           │
+           ▼
+    上位候補をコンテキストに注入
+```
+
+これにより、現在のメッセージに直接言及されていない事実も発見できます。
+
+### 動作サマリー
+
+| 契機 | 動作 | 設定 |
+|------|------|------|
+| 毎ユーザーメッセージ | 事実検索 → 上位N件注入 | `prefetch_limit`（デフォルト: 5） |
+| モデルが fact_store 呼び出し | 事実の保存/更新/削除 | 常時利用可能 |
+| モデルが memory ツール呼び出し | 自動ミラーリング | 常時有効 |
+| セッション終了 | LLM が事実抽出 | `auto_extract: true` |
+| 毎ターン（planner） | 複数クエリLLM検索 | `retrieval_planner: false` |
 
 ## 埋め込みモデルの差し替え
 
