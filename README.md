@@ -242,9 +242,76 @@ store = MemoryStore()
 store.rebuild_all_vectors()
 ```
 
+### Recommended Models
+
+| Model | Language | Dim | Size |
+|-------|----------|-----|------|
+| cl-nagoya/ruri-v3-310m | 🇯🇵 Japanese | 768 | 1.2 GB |
+| all-MiniLM-L6-v2 | 🇬🇧 English | 384 | 80 MB |
+| BAAI/bge-large-en-v1.5 | 🇬🇧 English | 1024 | 1.3 GB |
+| intfloat/multilingual-e5-large | 🌐 Multilingual | 1024 | 2.1 GB |
+
+## Architecture
+
+vecmemori combines **4 orthogonal similarity signals** into a final score:
+
+```
+User Query
+    │
+    ▼
+┌──────────────────────────┐
+│ 1. FTS5 (SQLite BM25)    │  weight=0.30 — keyword match
+│ 2. Jaccard coefficient   │  weight=0.10 — lexical overlap
+│ 3. HRR phase vectors     │  weight=0.20 — symbolic structure
+│ 4. Neural cosine sim     │  weight=0.40 — semantic similarity
+└──────────┬───────────────┘
+           ▼
+    Relevance × Trust × Decay
+           ▼
+    Sorted results (top N)
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Acknowledgments / 謝辞
+
+vecmemori stands on the shoulders of several projects and research works. We acknowledge and thank their creators.
+
+### Holographic Reduced Representations
+
+The HRR algorithm implemented in `vecmemori/hrr.py` is based on the seminal work of **Tony A. Plate**:
+
+> Plate, T. A. (1995). *Holographic Reduced Representations*. IEEE Transactions on Neural Networks, 6(3), 623–641.
+> Plate, T. A. (2003). *Holographic Reduced Representation: Distributed Representation for Cognitive Structures*. CSLI Publications.
+
+The implementation in this library is original code written from the mathematical specification. It does not copy from any existing HRR library. The algorithm itself is part of the scientific literature and not subject to copyright restrictions on its use.
+
+### Hermes Agent
+
+vecmemori was originally designed as a memory provider for **[Hermes Agent](https://github.com/nousresearch/hermes-agent)** by **Nous Research**. The `vecmemori/hermes/` adapter module is a thin compatibility layer that allows vecmemori to plug into Hermes Agent's memory provider system. We thank Nous Research for creating an extensible agent platform.
+
+### The Original Holographic Plugin
+
+vecmemori's architecture (hybrid FTS5 + HRR + trust scoring + entity resolution) was inspired by the `holographic` memory plugin bundled with Hermes Agent. vecmemori is **not a fork** — it is a standalone reimplementation with its own codebase, API, and additional features (fugashi Japanese tokenization, configurable embedding models, standalone pip package). The original plugin remains available in Hermes Agent's plugin directory under the MIT license.
+
+### Japanese Tokenization (fugashi + MeCab)
+
+Japanese text tokenization is powered by **[fugashi](https://github.com/polm/fugashi)** (MIT license), a Python wrapper for **[MeCab](https://taku910.github.io/mecab/)** (BSD license) by Taku Kudo and Nippon Telegraph and Telephone Corporation. The UniDic dictionary is distributed with permission from the National Institute for Japanese Language and Linguistics (NINJAL).
+
+### Core Dependencies
+
+| Library | License |
+|---------|---------|
+| [NumPy](https://numpy.org/) | BSD-3-Clause |
+| [SQLite](https://sqlite.org/) | Public Domain |
+| [sentence-transformers](https://www.sbert.net/) (optional) | Apache 2.0 |
+| [fugashi](https://github.com/polm/fugashi) (optional) | MIT |
+| [unidic-lite](https://github.com/polm/unidic-lite) (optional) | Public Domain |
+| [ruri-v3-310m](https://huggingface.co/cl-nagoya/ruri-v3-310m) (optional) | Apache 2.0 |
+
+vecmemori itself is released under the **MIT License** — you are free to use, modify, and distribute it in any context, commercial or otherwise, with attribution appreciated but not required.
 
 ---
 
@@ -290,10 +357,11 @@ for r in results:
 | 機能 | 説明 |
 |------|------|
 | **4系統ハイブリッド検索** | FTS5 + Jaccard + HRR + 埋め込み（重み: 0.30 / 0.10 / 0.20 / 0.40） |
+| **🇯🇵 日本語FTS5** | fugashi（MeCab）による形態素解析で日本語全文検索を実現 |
 | **エンティティ解決** | 事実から自動的に固有名詞を抽出・リンク |
 | **信頼度スコア** | 非対称フィードバック（参考になった: +0.05、参考にならない: -0.10） |
 | **代数検索** | エンティティ検索 / 複数エンティティAND検索 / 構造的隣接発見 / 矛盾検出 |
-| **グレースフルデグラデーション** | numpy だけでも動作。埋め込みはオプション |
+| **グレースフルデグラデーション** | numpy だけでも動作。埋め込みもトークナイザーもオプション |
 | **モデル差し替え** | 任意の SentenceTransformer モデルに対応 |
 
 ## 主なユースケース
@@ -303,7 +371,7 @@ vecmemori は以下のようなシナリオで特に威力を発揮します:
 - **AI アシスタントの長期記憶** — ユーザーの好みや設定を永続的に保存し、セッションを越えて参照
 - **プロジェクト知識の蓄積** — 技術選定や決定事項を事実として記録
 - **プライバシー重視の環境** — すべてローカルで完結。外部API不要
-- **日本語特化** — ruri-v3 による高精度な日本語意味検索に対応
+- **日本語特化** — ruri-v3 による高精度な日本語意味検索 + fugashi による日本語全文検索
 
 ## 設定
 
@@ -505,4 +573,40 @@ vecmemori は **4つの直交する類似度信号** を組み合わせて最終
 
 MIT — [LICENSE](LICENSE) 参照。
 
-HRR 実装（`hrr.py`）は Plate (1995) — *Holographic Reduced Representations* のアルゴリズムを実装したものです。コードはオリジナル、MITライセンスで提供され、第三者の HRR ライブラリは含みません。
+## 謝辞 / Acknowledgments
+
+vecmemori は以下のプロジェクトや研究の上に成り立っています。
+
+### Holographic Reduced Representations
+
+`vecmemori/hrr.py` に実装された HRR アルゴリズムは **Tony A. Plate** の先駆的な研究に基づいています:
+
+> Plate, T. A. (1995). *Holographic Reduced Representations*. IEEE Transactions on Neural Networks, 6(3), 623–641.
+> Plate, T. A. (2003). *Holographic Reduced Representation: Distributed Representation for Cognitive Structures*. CSLI Publications.
+
+このライブラリの実装は数学的仕様から独自に書かれたオリジナルコードです。既存の HRR ライブラリからのコピーは含みません。アルゴリズム自体は学術文献の一部であり、その利用に著作権上の制限はありません。
+
+### Hermes Agent
+
+vecmemori は元々 **[Hermes Agent](https://github.com/nousresearch/hermes-agent)**（**Nous Research** 開発）のメモリプロバイダーとして設計されました。`vecmemori/hermes/` アダプターモジュールは、vecmemori を Hermes Agent のメモリプロバイダーシステムに接続するための薄い互換レイヤーです。拡張可能なエージェントプラットフォームを提供してくださった Nous Research に感謝します。
+
+### オリジナル Holographic プラグイン
+
+vecmemori のアーキテクチャ（FTS5 + HRR + 信頼度スコア + エンティティ解決のハイブリッド）は、Hermes Agent にバンドルされていた `holographic` メモリプラグインに触発されたものです。vecmemori は **フォークではありません** — 独自のコードベース、API、追加機能（fugashi 日本語トークナイズ、設定可能な埋め込みモデル、スタンドアロン pip パッケージ）を持つ独立した再実装です。オリジナルのプラグインは Hermes Agent のプラグインディレクトリで MIT ライセンスのまま利用可能です。
+
+### 日本語トークナイゼーション（fugashi + MeCab）
+
+日本語テキストのトークナイズは **[fugashi](https://github.com/polm/fugashi)**（MIT ライセンス）を使用しています。fugashi は **[MeCab](https://taku910.github.io/mecab/)**（BSD ライセンス、Taku Kudo および日本電信電話株式会社）の Python ラッパーです。UniDic 辞書は国立国語研究所の許可を得て配布されています。
+
+### コア依存ライブラリ
+
+| ライブラリ | ライセンス |
+|-----------|-----------|
+| [NumPy](https://numpy.org/) | BSD-3-Clause |
+| [SQLite](https://sqlite.org/) | Public Domain |
+| [sentence-transformers](https://www.sbert.net/)（オプション） | Apache 2.0 |
+| [fugashi](https://github.com/polm/fugashi)（オプション） | MIT |
+| [unidic-lite](https://github.com/polm/unidic-lite)（オプション） | Public Domain |
+| [ruri-v3-310m](https://huggingface.co/cl-nagoya/ruri-v3-310m)（オプション） | Apache 2.0 |
+
+vecmemori 自体は **MIT ライセンス** でリリースされています。商用・非商用を問わず、自由に使用・改変・再配布できます。 attribution は歓迎しますが必須ではありません。
