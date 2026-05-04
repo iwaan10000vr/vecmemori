@@ -14,6 +14,8 @@
 
 Embeddings are a core requirement. vecmemori is not intended to be only a keyword-search database.
 
+> **Status:** Alpha. The core API is usable, but packaging and Hermes Agent integration may still change before a stable release.
+
 ## Privacy model
 
 The core library stores data locally in SQLite and uses a local SentenceTransformer-compatible embedding model by default. Data does not leave your device when you use the core library with a local model.
@@ -110,6 +112,32 @@ store.close()
 ## Hermes Agent integration
 
 `vecmemori[hermes]` installs the adapter dependencies (`PyYAML`, `httpx`) needed by the Hermes plugin module. It does **not** install Hermes Agent itself. Use this extra inside an environment where Hermes Agent is already installed/configured.
+
+### Install into Hermes Agent from GitHub
+
+Until vecmemori has a dedicated Hermes plugin installer, use the source checkout as the plugin directory and install the Python package into the same environment where Hermes runs:
+
+```bash
+git clone https://github.com/iwaan10000vr/vecmemori.git
+cd vecmemori
+python -m pip install -e ".[hermes,ja]"
+bash scripts/download_model.sh
+
+mkdir -p ~/.hermes/plugins
+ln -s "$(pwd)/src/vecmemori/hermes" ~/.hermes/plugins/vecmemori
+hermes config set memory.provider vecmemori
+hermes config set plugins.vecmemori.embedding_model "$HOME/.cache/vecmemori/models/ruri-v3-310m"
+```
+
+Optional local-first settings:
+
+```bash
+hermes config set plugins.vecmemori.auto_extract true
+hermes config set plugins.vecmemori.retrieval_planner false
+hermes config set plugins.vecmemori.embedding_trust_remote_code false
+```
+
+Restart Hermes Agent after changing plugin code or memory provider settings.
 
 Lifecycle when used as a Hermes memory provider:
 

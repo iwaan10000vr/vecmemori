@@ -14,6 +14,8 @@
 
 埋め込みは中核機能です。vecmemori は「単なる全文検索DB」ではなく、意味検索を前提としたメモリシステムです。
 
+> **ステータス:** Alpha。コアAPIは利用可能ですが、安定版まではパッケージングや Hermes Agent 連携方法が変わる可能性があります。
+
 ## プライバシーモデル
 
 コアライブラリは SQLite とローカルの SentenceTransformer 互換モデルを使います。この構成ではデータは端末内に留まります。
@@ -110,6 +112,32 @@ store.close()
 ## Hermes Agent連携
 
 `vecmemori[hermes]` は Hermes plugin module に必要な `PyYAML` / `httpx` などを入れます。Hermes Agent本体はインストールしません。既に Hermes Agent が入っている環境に追加するための extra です。
+
+### GitHub から Hermes Agent に入れる
+
+専用の Hermes plugin installer を整えるまでは、source checkout を plugin directory として使い、Hermes が動く Python 環境に vecmemori をインストールしてください。
+
+```bash
+git clone https://github.com/iwaan10000vr/vecmemori.git
+cd vecmemori
+python -m pip install -e ".[hermes,ja]"
+bash scripts/download_model.sh
+
+mkdir -p ~/.hermes/plugins
+ln -s "$(pwd)/src/vecmemori/hermes" ~/.hermes/plugins/vecmemori
+hermes config set memory.provider vecmemori
+hermes config set plugins.vecmemori.embedding_model "$HOME/.cache/vecmemori/models/ruri-v3-310m"
+```
+
+任意のローカル優先設定:
+
+```bash
+hermes config set plugins.vecmemori.auto_extract true
+hermes config set plugins.vecmemori.retrieval_planner false
+hermes config set plugins.vecmemori.embedding_trust_remote_code false
+```
+
+plugin code や memory provider 設定を変えた後は、Hermes Agent を再起動してください。
 
 Hermes memory provider として使う場合の流れ:
 
