@@ -665,21 +665,29 @@ class VecmemoriMemoryProvider(MemoryProvider):
         endpoint = api_conf["base_url"].rstrip("/") + "/chat/completions"
 
         import httpx
-        resp = httpx.post(
-            endpoint,
-            headers={"Authorization": f"Bearer {api_conf['api_key']}"},
-            json={
-                "model": api_conf["model"],
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"会話:\n{conversation}"},
-                ],
-                "temperature": 0.1,
-                "max_tokens": self._config.get("auto_extract_max_tokens", 4000),
-            },
-            timeout=self._config.get("auto_extract_timeout", 120),
-        )
-        resp.raise_for_status()
+        timeout_val = self._config.get("auto_extract_timeout", 300)
+        try:
+            resp = httpx.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_conf['api_key']}"},
+                json={
+                    "model": api_conf["model"],
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"会話:\n{conversation}"},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": self._config.get("auto_extract_max_tokens", 4000),
+                },
+                timeout=timeout_val,
+            )
+            resp.raise_for_status()
+        except httpx.ReadTimeout:
+            logger.warning("LLM extract timed out (%ss) — skipping", timeout_val)
+            return
+        except httpx.HTTPStatusError as e:
+            logger.warning("LLM extract API error: %s (status=%s)", e.response.status_code, e.response.status_code)
+            return
         text = resp.json()["choices"][0]["message"]["content"]
 
         code = text.strip()
@@ -748,6 +756,21 @@ class VecmemoriMemoryProvider(MemoryProvider):
             api_key = _os.environ.get(env_key, api_key)
         if api_key in ("local", ""):
             api_key = _os.environ.get("OPENCODE_GO_API_KEY", api_key)
+
+        # Fallback: directly read .env if os.environ still doesn't have the key
+        if api_key in ("local", ""):
+            try:
+                from dotenv import dotenv_values
+                env_path = get_hermes_home() / ".env"
+                if env_path.exists():
+                    env_vals = dotenv_values(str(env_path))
+                    if provider in _CREDENTIAL_ENV_MAP:
+                        env_key = _CREDENTIAL_ENV_MAP[provider]
+                        api_key = env_vals.get(env_key, api_key)
+                    if api_key in ("local", ""):
+                        api_key = env_vals.get("OPENCODE_GO_API_KEY", api_key)
+            except ImportError:
+                pass
 
         return {"model": model, "base_url": base_url, "api_key": api_key, "provider": provider}
 
